@@ -125,5 +125,3 @@ class Trainer:
                 torch.save(self.model.state_dict(), save_path)
                 print(f"Saved best model to {save_path} ({self.best_metric_name}: {self.best_metric:.4f})")
 
-
-print("aaa")
