@@ -103,6 +103,7 @@ class Trainer:
                 y_true = y_batch.to(self.device)
 
                 logits = self.model(input_ids=input_ids, attention_mask=attention_mask)
+                logits=torch.sigmoid(logits)
 
                 # 只更新分类度量，不更新 loss
                 self.metrics.update({

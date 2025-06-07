@@ -55,6 +55,6 @@ class ClinicalLongformerLabelAttention(nn.Module):
 
         # 标签注意力生成候选标签上下文表示 (N, C, H)
         logits= self.attention(text_hidden, attention_mask,self.label_embs)
-        logits=torch.sigmoid(logits)
         # 分类得分 (N, C)
         return logits
+    
