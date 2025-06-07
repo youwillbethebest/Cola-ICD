@@ -1,8 +1,4 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-定义 Trainer 类，负责优化器、调度、损失、训练/验证循环、多种度量和最佳模型保存
-"""
+
 import argparse
 import os
 import torch
@@ -130,3 +126,4 @@ class Trainer:
                 print(f"Saved best model to {save_path} ({self.best_metric_name}: {self.best_metric:.4f})")
 
 
+print("aaa")
