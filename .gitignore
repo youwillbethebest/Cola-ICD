@@ -7,3 +7,4 @@ ICD-MSMN/
 *.out
 *.sh
 src/__pycache__/
+.gitignore
