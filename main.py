@@ -7,8 +7,10 @@ from transformers import get_linear_schedule_with_warmup
 from torch.optim import AdamW
 from src.data_loader import TextLoader, LabelLoader, ICDMultiLabelDataset
 from src.model import ClinicalLongformerLabelAttention
-from src.metric import MetricCollection, Precision, Recall, F1Score, MeanAveragePrecision, AUC,Precision_K
+from src.metric import MetricCollection, Precision, Recall, F1Score, MeanAveragePrecision, AUC, Precision_K, LossMetric
 from src.trainer import Trainer
+import wandb
+from datetime import datetime
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -22,7 +24,7 @@ def parse_args():
     parser.add_argument("--label_model_name", type=str, default="Bio_ClinicalBERT", help="Pretrained model for label encoding")
     parser.add_argument("--max_length", type=int, default=4096, help="Max sequence length for text")
     parser.add_argument("--label_max_length", type=int, default=128, help="Max sequence length for label descriptions")
-    parser.add_argument("--batch_size", type=int, default=8)
+    parser.add_argument("--batch_size", type=int, default=12)
     parser.add_argument("--epochs", type=int, default=5)
     parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument("--weight_decay", type=float, default=0.0)
@@ -30,13 +32,22 @@ def parse_args():
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--output_dir", type=str, default="checkpoints")
-    parser.add_argument("--best_metric_name", type=str, default="MeanAveragePrecision", help="Metric name to select best model")
+    parser.add_argument("--best_metric_name", type=str, default="map", help="Metric name to select best model")
     parser.add_argument("--use_amp", action="store_true", default=True, help="Whether to use mixed precision training")
+    parser.add_argument("--use_wandb", action="store_true", default=False, help="Whether to enable Weights & Biases logging")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+    # W&B 开关
+    if args.use_wandb:
+        now = datetime.now().strftime("%m-%d_%H-%M")
+        wandb.init(project="Attentionicd", name=f"Attentionicd_{now}")
+        # Log all hyperparameters
+        wandb.config.update(vars(args), allow_val_change=True)
+    else:
+        print("W&B logging disabled.")
     device = torch.device(args.device)
     print(f"Use AMP: {args.use_amp}")
     print(f"Using device: {device}")
@@ -63,6 +74,9 @@ def main():
         codes_file=args.codes_file,
         label_model_name=args.label_model_name
     )
+    # Monitor model structure and parameters
+    if args.use_wandb:
+        wandb.watch(model)
 
     print("Setting up optimizer and scheduler...")
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -83,7 +97,8 @@ def main():
         Precision_K(k=10),
         Precision_K(k=8),
         Precision_K(k=5),
-        MeanAveragePrecision()
+        MeanAveragePrecision(),
+        LossMetric()
     ])
     metrics.to(device)
     
@@ -102,7 +117,8 @@ def main():
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         output_dir=args.output_dir,
         best_metric_name=args.best_metric_name,
-        use_amp=args.use_amp
+        use_amp=args.use_amp,
+        use_wandb=args.use_wandb
     )
     print("Training started")
     trainer.train()
