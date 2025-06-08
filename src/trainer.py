@@ -1,4 +1,3 @@
-
 import argparse
 import os
 import torch
@@ -10,6 +9,7 @@ from src.data_loader import TextLoader, LabelLoader, ICDMultiLabelDataset
 from src.model import ClinicalLongformerLabelAttention
 from src.metric import MetricCollection, Precision, Recall, F1Score, MeanAveragePrecision, AUC
 from tqdm import tqdm
+from torch.cuda.amp import autocast, GradScaler
 
 class Trainer:
     """
@@ -29,7 +29,8 @@ class Trainer:
         epochs: int,
         gradient_accumulation_steps: int = 1,
         output_dir: str = "checkpoints",
-        best_metric_name: str = "MeanAveragePrecision"
+        best_metric_name: str = "MeanAveragePrecision",
+        use_amp: bool = False
     ):
         self.model = model
         self.train_loader = train_loader
@@ -47,6 +48,11 @@ class Trainer:
         os.makedirs(self.output_dir, exist_ok=True)
         self.best_metric = None
         self.best_epoch = -1
+        self.use_amp = use_amp
+        if self.use_amp:
+            self.scaler = GradScaler()
+        else:
+            self.scaler = None
 
     def train(self):
         self.model.to(self.device)
@@ -66,12 +72,23 @@ class Trainer:
             attention_mask = x_batch['attention_mask'].to(self.device)
             y_true = y_batch.to(self.device)
 
-            logits = self.model(input_ids=input_ids, attention_mask=attention_mask)
-            loss = self.criterion(logits, y_true) / self.grad_acc_steps
-            loss.backward()
+            # 混合精度前向和反向
+            if self.use_amp:
+                with autocast():
+                    logits = self.model(input_ids=input_ids, attention_mask=attention_mask)
+                    loss = self.criterion(logits, y_true) / self.grad_acc_steps
+                self.scaler.scale(loss).backward()
+            else:
+                logits = self.model(input_ids=input_ids, attention_mask=attention_mask)
+                loss = self.criterion(logits, y_true) / self.grad_acc_steps
+                loss.backward()
 
             if step % self.grad_acc_steps == 0 or step == len(self.train_loader):
-                self.optimizer.step()
+                if self.use_amp:
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    self.optimizer.step()
                 self.scheduler.step()
                 self.optimizer.zero_grad()
             
@@ -112,7 +129,7 @@ class Trainer:
                     pbar.update(1000)
         all_logits = torch.cat(all_logits, dim=0)
         all_targets = torch.cat(all_targets, dim=0)
-        results = self.metrics.compute(logits=all_logits, targets=all_targets)
+        results = self.metrics.compute(logits=all_logits.cpu(), targets=all_targets.cpu())
         print(f"{data_loader}:  ", {k: float(v) for k, v in results.items()})
 
         current = results.get(self.best_metric_name)

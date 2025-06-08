@@ -31,12 +31,14 @@ def parse_args():
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--output_dir", type=str, default="checkpoints")
     parser.add_argument("--best_metric_name", type=str, default="MeanAveragePrecision", help="Metric name to select best model")
+    parser.add_argument("--use_amp", action="store_true", default=True, help="Whether to use mixed precision training")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
     device = torch.device(args.device)
+    print(f"Use AMP: {args.use_amp}")
     print(f"Using device: {device}")
 
     # 数据加载和模型初始化
@@ -99,12 +101,12 @@ def main():
         epochs=args.epochs,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         output_dir=args.output_dir,
-        best_metric_name=args.best_metric_name
+        best_metric_name=args.best_metric_name,
+        use_amp=args.use_amp
     )
     print("Training started")
     trainer.train()
     print("Training completed")
-
 
 if __name__ == "__main__":
     main()
