@@ -107,7 +107,7 @@ def main():
         model=model,
         train_loader=train_loader,
         val_loader=val_loader,
-        test_loader=test_loader,  # 使用验证集作为测试集
+        test_loader=test_loader,  
         criterion=criterion,
         optimizer=optimizer,
         scheduler=scheduler,

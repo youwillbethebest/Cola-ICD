@@ -3,13 +3,10 @@ import os
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
-from transformers import get_linear_schedule_with_warmup
-from torch.optim import AdamW
-from src.data_loader import TextLoader, LabelLoader, ICDMultiLabelDataset
-from src.model import ClinicalLongformerLabelAttention
-from src.metric import MetricCollection, Precision, Recall, F1Score, MeanAveragePrecision, AUC
+from src.metric import MetricCollection
 from tqdm import tqdm
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast
+from torch.cuda.amp import GradScaler
 import wandb
 
 class Trainer:
@@ -121,8 +118,8 @@ class Trainer:
                 self.update_metrics(outputs)
                 all_logits.append(outputs['logits'])
                 all_targets.append(outputs['targets'])
-                if step % 1000 == 0:
-                    pbar.update(1000)
+                if step % 500 == 0:
+                    pbar.update(500)
         all_logits = torch.cat(all_logits, dim=0)
         all_targets = torch.cat(all_targets, dim=0)
         # 仅在 val 阶段保存最佳模型
@@ -190,13 +187,13 @@ class Trainer:
         attention_mask = x_batch['attention_mask'].to(self.device)
         y_true = y_batch.to(self.device)
         if self.use_amp:
-            with autocast():
+            with autocast('cuda'):
                 logits = self.model(input_ids=input_ids, attention_mask=attention_mask)
-                loss = self.criterion(logits, y_true)  # 使用原始 loss，不除以 grad_acc_steps
+                loss = self.criterion(logits, y_true)  
         else:
             logits = self.model(input_ids=input_ids, attention_mask=attention_mask)
             loss = self.criterion(logits, y_true) 
-        logits = torch.sigmoid(logits) # 使用原始 loss，不除以 grad_acc_steps
+        logits = torch.sigmoid(logits) 
         return {'loss': loss, 'logits': logits, 'targets': y_true}
 
     def validation_step(self, x_batch, y_batch):
