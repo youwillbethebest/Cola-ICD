@@ -5,7 +5,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from transformers import get_linear_schedule_with_warmup
 from torch.optim import AdamW
-from src.data_loader import TextLoader, LabelLoader, ICDMultiLabelDataset
+from src.data_loader import TextLoader, LabelLoader, ICDMultiLabelDataset, SynonymLabelLoader
 from src.model import ClinicalLongformerLabelAttention
 from src.metric import MetricCollection, Precision, Recall, F1Score, MeanAveragePrecision, AUC, Precision_K, LossMetric
 from src.trainer import Trainer
@@ -35,6 +35,7 @@ def parse_args():
     parser.add_argument("--best_metric_name", type=str, default="map", help="Metric name to select best model")
     parser.add_argument("--use_amp", action="store_true", default=True, help="Whether to use mixed precision training")
     parser.add_argument("--use_wandb", action="store_true", default=False, help="Whether to enable Weights & Biases logging")
+    parser.add_argument("--term_count",type=int, default=1, help="Whether to use synonym")
     return parser.parse_args()
 
 
@@ -56,7 +57,7 @@ def main():
     print("Loading text tokenizer...")
     text_loader = TextLoader(pretrained_model_name=args.pretrained_model_name, max_length=args.max_length)
     print("Loading label tokenizer and model...")
-    label_loader = LabelLoader(codes_file=args.codes_file, pretrained_model_name=args.label_model_name, max_length=args.label_max_length)
+    label_loader = SynonymLabelLoader(codes_file=args.codes_file, pretrained_model_name=args.label_model_name, max_length=args.label_max_length,term_count=args.term_count)
     print(f"Number of labels: {label_loader.num_labels}")
 
     print("Creating training dataset...")

@@ -58,3 +58,18 @@ class ClinicalLongformerLabelAttention(nn.Module):
         # 分类得分 (N, C)
         return logits
     
+
+class ClinicalLongformerLabelAttentionV2(nn.Module):
+    '''
+    
+    '''
+    
+    def __init__(self,
+                 longformer_path: str,
+                 codes_file: str,
+                 label_model_name: str = "Bio_ClinicalBERT"):
+        super().__init__()
+        self.model= AutoModel.from_pretrained(longformer_path)
+        hidden_size = self.model.config.hidden_size
+        
+        
