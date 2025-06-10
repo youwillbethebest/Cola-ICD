@@ -6,6 +6,58 @@ from transformers import AutoTokenizer, AutoModel
 from tqdm import tqdm
 import json
 import random
+import re
+
+# ---------------------------------------------
+# 替换原有的 get_headersandindex、get_subnote
+def get_headersandindex(input_str: str):
+    """
+    在无任何标点、无换行的连续文本中，
+    按 headers_to_select 中的关键子串查找首次出现的位置，
+    并按其在原文中的顺序切分。
+    """
+    low_text = input_str.lower()
+    headers_to_select = [
+        "chief complaint",
+        "major surgical or invasive procedure",
+        "history of present illness",
+        "past medical history",
+        "social history",
+        "family history",
+        "physical exam",
+        "pertinent results",
+        "brief hospital course",
+        "medications on admission",
+        "discharge disposition",
+        "discharge diagnosis",
+        "discharge condition",
+        "discharge instructions",
+        "followup instructions",
+    ]
+    # 收集每个标题首次出现的位置
+    positions = []
+    for hdr in headers_to_select:
+        idx = low_text.find(hdr)
+        if idx != -1:
+            positions.append((idx, hdr))
+    # 按位置排序
+    positions.sort(key=lambda x: x[0])
+    if not positions:
+        return []
+    # 构造 (hdr, start, end) 区间列表
+    intervals = []
+    for i, (start, hdr) in enumerate(positions):
+        end = positions[i+1][0] if i+1 < len(positions) else len(input_str)
+        intervals.append((hdr, start, end))
+    return intervals
+
+def get_subnote(input_str: str, headers_pos: list):
+    """
+    将 headers_pos 指定的所有区间依次拼接，
+    只保留这些重要区块。
+    """
+    return "".join(input_str[start:end] for _, start, end in headers_pos)
+# ---------------------------------------------
 
 class TextLoader:
     """文本 Tokenizer，不变"""
@@ -14,8 +66,43 @@ class TextLoader:
         self.max_length = max_length
 
     def __call__(self, text: str) -> dict:
+        # 1. 清理掉特殊标记
+
+        # 2. tokenize 判断长度
+        tokens = self.tokenizer.tokenize(text)
+        if len(tokens) > self.max_length:
+            # 优先按标题提取
+            headers_pos = get_headersandindex(text)
+            keep_headers = [
+                "chief complaint",
+                "major surgical or invasive procedure",
+                "history of present illness",
+                "past medical history",
+                "brief hospital course",
+                "discharge diagnosis",
+                "discharge condition",
+            ]
+            headers_pos = [h for h in headers_pos if h[0] in keep_headers]
+            if headers_pos:
+                sub = get_subnote(text, headers_pos)
+                tokens_sub = self.tokenizer.tokenize(sub)
+                if len(tokens_sub) <= self.max_length:
+                    raw_text = sub
+                else:
+                    # 提取后仍超长，fallback 到前后截断
+                    half = self.max_length // 2
+                    head = tokens_sub[:half]; tail = tokens_sub[-half:]
+                    raw_text = self.tokenizer.convert_tokens_to_string(head + tail)
+            else:
+                # 没匹配到标题，直接前后截断
+                half = self.max_length // 2
+                head = tokens[:half]; tail = tokens[-half:]
+                raw_text = self.tokenizer.convert_tokens_to_string(head + tail)
+        else:
+            raw_text = text
+        # 3. 最终固定长度 encoding
         encoding = self.tokenizer(
-            text,
+            raw_text,
             padding='max_length',
             truncation=True,
             max_length=self.max_length,

@@ -69,3 +69,6 @@ class LabelAttention(nn.Module):
         m=m.reshape(batch_size, -1, att_dim)
     m = self.rep_dropout(m)
     return m
+  
+class GATLayer(nn.Module):
+    pass

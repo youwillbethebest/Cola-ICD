@@ -8,7 +8,8 @@ from src.data_loader import TextLoader, LabelLoader, ICDMultiLabelDataset
 from src.model import ClinicalLongformerLabelAttention
 from src.metric import MetricCollection, Precision, Recall, F1Score, MeanAveragePrecision, AUC, Precision_K, LossMetric
 from src.trainer import Trainer
-
+import wandb
+from datetime import datetime
 # 配置
 train_file = "data/mimiciv_icd9_train.feather"
 val_file = "data/mimiciv_icd9_val.feather"
@@ -19,19 +20,24 @@ label_model_name = "Bio_ClinicalBERT"
 max_length = 4096
 label_max_length = 128
 batch_size = 8
-epochs = 1
+epochs = 5
 lr = 2e-5
 weight_decay = 0.0
 warmup_steps = 0
 gradient_accumulation_steps = 1
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 use_amp = True
-use_wandb = False
+use_wandb = True
 output_dir = "checkpoints_test"
 best_metric_name = "map"
 
 os.makedirs(output_dir, exist_ok=True)
-
+if use_wandb:
+    now = datetime.now().strftime("%m-%d_%H-%M")
+    wandb.init(project="Attentionicd", name=f"Attentionicd_{now}")
+    # Log all hyperparameters
+else:
+    print("W&B logging disabled.")
 print("Initializing loaders...")
 text_loader = TextLoader(pretrained_model_name=pretrained_model_name, max_length=max_length)
 label_loader = LabelLoader(codes_file=codes_file, pretrained_model_name=label_model_name, max_length=label_max_length)

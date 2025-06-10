@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader
 from src.metric import MetricCollection
 from tqdm import tqdm
 from torch.amp import autocast
-from torch.cuda.amp import GradScaler
+from torch.amp import GradScaler
 import wandb
 
 class Trainer:
@@ -50,7 +50,7 @@ class Trainer:
         self.use_amp = use_amp
         self.use_wandb = use_wandb
         if self.use_amp:
-            self.scaler = GradScaler()
+            self.scaler = GradScaler("cuda")
         else:
             self.scaler = None
 

@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from transformers import AutoModel
 from src.module import LabelAttention
-from src.data_loader import LabelLoader
+from src.data_loader import SynonymLabelLoader
 
 class ClinicalLongformerLabelAttention(nn.Module):
     """
@@ -15,16 +15,18 @@ class ClinicalLongformerLabelAttention(nn.Module):
     def __init__(self,
                  longformer_path: str,
                  codes_file: str,
-                 label_model_name: str = "Bio_ClinicalBERT"):
+                 label_model_name: str = "Bio_ClinicalBERT",
+                 term_counts: int =1):
         super().__init__()
         # 文本编码器
         self.model= AutoModel.from_pretrained(longformer_path)
         hidden_size = self.model.config.hidden_size
 
-        # 标签加载与编码
-        label_loader = LabelLoader(
+        # 标签加载与编码（使用 SynonymLabelLoader 支持同义词）
+        label_loader = SynonymLabelLoader(
             codes_file=codes_file,
-            pretrained_model_name=label_model_name
+            pretrained_model_name=label_model_name,
+            term_count=term_counts
         )
         self.num_labels = label_loader.num_labels
         label_enc = label_loader()
@@ -43,7 +45,7 @@ class ClinicalLongformerLabelAttention(nn.Module):
         self.register_buffer('label_embs', label_embs)
 
         # 标签感知注意力模块
-        self.attention = LabelAttention(attention_head=1,rep_droupout_num=0.1,head_pooling="concat",att_dropout_num=0.1,attention_dim=hidden_size,num_labels=self.num_labels)
+        self.attention = LabelAttention(attention_head=term_counts,rep_droupout_num=0.1,head_pooling="concat",att_dropout_num=0.1,attention_dim=hidden_size,num_labels=self.num_labels)
         # 分类头
 
     def forward(self,   
