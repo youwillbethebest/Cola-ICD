@@ -17,10 +17,10 @@ test_file = "data/mimiciv_icd9_test.feather"
 codes_file = "data/filtered_icd_codes_with_desc.feather"
 pretrained_model_name = "Clinical-Longformer"
 label_model_name = "Bio_ClinicalBERT"
-max_length = 4096
+max_length = 1024
 label_max_length = 128
 batch_size = 8
-epochs = 5
+epochs = 2
 lr = 2e-5
 weight_decay = 0.0
 warmup_steps = 0
@@ -47,7 +47,7 @@ train_full = ICDMultiLabelDataset(data_file=train_file, text_loader=text_loader,
 val_full = ICDMultiLabelDataset(data_file=val_file, text_loader=text_loader, label_loader=label_loader)
 test_full = ICDMultiLabelDataset(data_file=test_file, text_loader=text_loader, label_loader=label_loader)
 
-sample_size = 1000
+sample_size = 200
 train_dataset = Subset(train_full, range(min(sample_size, len(train_full))))
 val_dataset = Subset(val_full, range(min(sample_size, len(val_full))))
 test_dataset = Subset(test_full, range(min(sample_size, len(test_full))))
@@ -72,20 +72,38 @@ scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=warmup_s
 criterion = nn.BCEWithLogitsLoss()
 
 print("Initializing metrics...")
-metrics = MetricCollection([
-    Precision(number_of_classes=label_loader.num_labels, average="macro"),
-    Precision(number_of_classes=label_loader.num_labels, average="micro"),
-    F1Score(number_of_classes=label_loader.num_labels, average="macro"),
-    F1Score(number_of_classes=label_loader.num_labels, average="micro"),
-    AUC(number_of_classes=label_loader.num_labels, average="macro"),
-    AUC(number_of_classes=label_loader.num_labels, average="micro"),
-    Precision_K(k=10),
-    Precision_K(k=8),
-    Precision_K(k=5),
-    MeanAveragePrecision(),
-    LossMetric()
-])
-metrics.to(device)
+metrics = {
+                "train":MetricCollection([LossMetric()]),
+                "val":MetricCollection([
+                    Precision(number_of_classes=label_loader.num_labels, average="macro"),
+                    Precision(number_of_classes=label_loader.num_labels, average="micro"),
+                    F1Score(number_of_classes=label_loader.num_labels, average="macro"),
+                    F1Score(number_of_classes=label_loader.num_labels, average="micro"),
+                    AUC(number_of_classes=label_loader.num_labels,average="macro"),
+                    AUC(number_of_classes=label_loader.num_labels,average="micro"),
+                    Precision_K(k=10),
+                    Precision_K(k=8),
+                    Precision_K(k=5),
+                    MeanAveragePrecision(),
+                    LossMetric()
+                ]),
+                "test":MetricCollection([
+                    Precision(number_of_classes=label_loader.num_labels, average="macro"),
+                    Precision(number_of_classes=label_loader.num_labels, average="micro"),
+                    F1Score(number_of_classes=label_loader.num_labels, average="macro"),
+                    F1Score(number_of_classes=label_loader.num_labels, average="micro"),
+                    AUC(number_of_classes=label_loader.num_labels,average="macro"),
+                    AUC(number_of_classes=label_loader.num_labels,average="micro"),
+                    Precision_K(k=10),
+                    Precision_K(k=8),
+                    Precision_K(k=5),
+                    MeanAveragePrecision(),
+                    LossMetric()
+                ])
+    }
+
+for mc in metrics.values():
+    mc.to(device)
 
 print("Initializing trainer...")
 trainer = Trainer(

@@ -89,20 +89,38 @@ def main():
 
     criterion = nn.BCEWithLogitsLoss()
     print("Initializing metrics...")
-    metrics = MetricCollection([
-        Precision(number_of_classes=label_loader.num_labels, average="macro"),
-        Precision(number_of_classes=label_loader.num_labels, average="micro"),
-        F1Score(number_of_classes=label_loader.num_labels, average="macro"),
-        F1Score(number_of_classes=label_loader.num_labels, average="micro"),
-        AUC(number_of_classes=label_loader.num_labels,average="macro"),
-        AUC(number_of_classes=label_loader.num_labels,average="micro"),
-        Precision_K(k=10),
-        Precision_K(k=8),
-        Precision_K(k=5),
-        MeanAveragePrecision(),
-        LossMetric()
-    ])
-    metrics.to(device)
+    metrics = {
+                "train":MetricCollection([LossMetric()]),
+                "val":MetricCollection([
+                    Precision(number_of_classes=label_loader.num_labels, average="macro"),
+                    Precision(number_of_classes=label_loader.num_labels, average="micro"),
+                    F1Score(number_of_classes=label_loader.num_labels, average="macro"),
+                    F1Score(number_of_classes=label_loader.num_labels, average="micro"),
+                    AUC(number_of_classes=label_loader.num_labels,average="macro"),
+                    AUC(number_of_classes=label_loader.num_labels,average="micro"),
+                    Precision_K(k=10),
+                    Precision_K(k=8),
+                    Precision_K(k=5),
+                    MeanAveragePrecision(),
+                    LossMetric()
+                ]),
+                "test":MetricCollection([
+                    Precision(number_of_classes=label_loader.num_labels, average="macro"),
+                    Precision(number_of_classes=label_loader.num_labels, average="micro"),
+                    F1Score(number_of_classes=label_loader.num_labels, average="macro"),
+                    F1Score(number_of_classes=label_loader.num_labels, average="micro"),
+                    AUC(number_of_classes=label_loader.num_labels,average="macro"),
+                    AUC(number_of_classes=label_loader.num_labels,average="micro"),
+                    Precision_K(k=10),
+                    Precision_K(k=8),
+                    Precision_K(k=5),
+                    MeanAveragePrecision(),
+                    LossMetric()
+                ])
+    }
+
+    for mc in metrics.values():
+        mc.to(device)
     
     print("Initializing trainer...")
     trainer = Trainer(
