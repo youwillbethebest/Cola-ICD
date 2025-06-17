@@ -2,6 +2,10 @@ import argparse
 import os
 import torch
 import torch.nn as nn
+import torch.distributed as dist
+import torch.multiprocessing as mp
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data import DataLoader
 from transformers import get_linear_schedule_with_warmup
 from torch.optim import AdamW
@@ -13,6 +17,17 @@ import wandb
 from datetime import datetime
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+def setup_ddp(rank, world_size):
+    """初始化DDP环境"""
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+    torch.cuda.set_device(rank)
+
+def cleanup_ddp():
+    """清理DDP环境"""
+    dist.destroy_process_group()
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Trainer for ICD multi-label classification using label attention model")
@@ -36,16 +51,23 @@ def parse_args():
     parser.add_argument("--use_amp", action="store_true", default=True, help="Whether to use mixed precision training")
     parser.add_argument("--use_wandb", action="store_true", default=False, help="Whether to enable Weights & Biases logging")
     parser.add_argument("--term_count",type=int, default=1, help="Whether to use synonym")
+    parser.add_argument("--use_ddp", action="store_true", default=False, help="Whether to use DDP for distributed training")
+    parser.add_argument("--world_size", type=int, default=torch.cuda.device_count(), help="Number of GPUs to use for DDP")
+    parser.add_argument("--threshold", type=float, default=0.37, help="Threshold for metrics")
     return parser.parse_args()
 
-
-def main():
-    args = parse_args()
-    # W&B 开关
-    if args.use_wandb:
+def main_worker(rank, args):
+    """DDP训练的工作进程"""
+    if args.use_ddp:
+        setup_ddp(rank, args.world_size)
+        device = torch.device(f"cuda:{rank}")
+    else:
+        device = torch.device(args.device)
+    
+    # W&B初始化（只在rank 0进行）
+    if args.use_wandb and (not args.use_ddp or rank == 0):
         now = datetime.now().strftime("%m-%d_%H-%M")
         wandb.init(project="Attentionicd", name=f"Attentionicd_{now}")
-        # Log all hyperparameters
         wandb.config.update(vars(args), allow_val_change=True)
     else:
         print("W&B logging disabled.")
@@ -65,10 +87,42 @@ def main():
     print("Creating validation dataset...")
     val_dataset = ICDMultiLabelDataset(data_file=args.val_file, text_loader=text_loader, label_loader=label_loader)
     test_dataset = ICDMultiLabelDataset(data_file=args.test_file, text_loader=text_loader, label_loader=label_loader)
+    
+    # 创建分布式采样器
+    if args.use_ddp:
+        train_sampler = DistributedSampler(train_dataset, num_replicas=args.world_size, rank=rank)
+        val_sampler = DistributedSampler(val_dataset, num_replicas=args.world_size, rank=rank, shuffle=False)
+        test_sampler = DistributedSampler(test_dataset, num_replicas=args.world_size, rank=rank, shuffle=False)
+    else:
+        train_sampler = None
+        val_sampler = None
+        test_sampler = None
+    
     print("Creating data loaders...")
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=32, pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=32, pin_memory=True)
-    test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=32, pin_memory=True)
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=args.batch_size, 
+        sampler=train_sampler,
+        shuffle=(train_sampler is None),
+        num_workers=8 // args.world_size if args.use_ddp else 8, 
+        pin_memory=True
+    )
+    val_loader = DataLoader(
+        val_dataset, 
+        batch_size=args.batch_size, 
+        sampler=val_sampler,
+        shuffle=False, 
+        num_workers=8 // args.world_size if args.use_ddp else 8, 
+        pin_memory=True
+    )
+    test_loader = DataLoader(
+        test_dataset, 
+        batch_size=args.batch_size, 
+        sampler=test_sampler,
+        shuffle=False, 
+        num_workers=8 // args.world_size if args.use_ddp else 8, 
+        pin_memory=True
+    )
     print("Initializing model...")
     model = ClinicalLongformerLabelAttention(
         longformer_path=args.pretrained_model_name,
@@ -76,8 +130,15 @@ def main():
         label_model_name=args.label_model_name,
         term_counts=args.term_count
     )
-    # Monitor model structure and parameters
-    if args.use_wandb:
+    
+    model.to(device)
+    
+    # 包装为DDP模型
+    if args.use_ddp:
+        model = DDP(model, device_ids=[rank], output_device=rank, find_unused_parameters=True)
+    
+    # W&B监控（只在rank 0）
+    if args.use_wandb and (not args.use_ddp or rank == 0):
         wandb.watch(model)
 
     print("Setting up optimizer and scheduler...")
@@ -98,6 +159,7 @@ def main():
                     F1Score(number_of_classes=label_loader.num_labels, average="micro"),
                     AUC(number_of_classes=label_loader.num_labels,average="macro"),
                     AUC(number_of_classes=label_loader.num_labels,average="micro"),
+                    Precision_K(k=15),
                     Precision_K(k=10),
                     Precision_K(k=8),
                     Precision_K(k=5),
@@ -111,6 +173,7 @@ def main():
                     F1Score(number_of_classes=label_loader.num_labels, average="micro"),
                     AUC(number_of_classes=label_loader.num_labels,average="macro"),
                     AUC(number_of_classes=label_loader.num_labels,average="micro"),
+                    Precision_K(k=15),
                     Precision_K(k=10),
                     Precision_K(k=8),
                     Precision_K(k=5),
@@ -120,6 +183,7 @@ def main():
     }
 
     for mc in metrics.values():
+        mc.set_threshold(args.threshold)
         mc.to(device)
     
     print("Initializing trainer...")
@@ -138,11 +202,32 @@ def main():
         output_dir=args.output_dir,
         best_metric_name=args.best_metric_name,
         use_amp=args.use_amp,
-        use_wandb=args.use_wandb
+        use_wandb=args.use_wandb and (not args.use_ddp or rank == 0),
+        use_ddp=args.use_ddp,
+        rank=rank if args.use_ddp else 0,
+        world_size=args.world_size if args.use_ddp else 1,
+        train_sampler=train_sampler
     )
     print("Training started")
     trainer.train()
     print("Training completed")
+    
+    if args.use_ddp:
+        cleanup_ddp()
+
+def main():
+    args = parse_args()
+    
+    # 为输出目录添加小时级时间戳，格式：YYYYMMDD_HH
+    timestamp = datetime.now().strftime("%Y%m%d_%H")
+    args.output_dir = os.path.join(args.output_dir, timestamp)
+
+    if args.use_ddp and torch.cuda.device_count() > 1:
+        print(f"Starting DDP training on {args.world_size} GPUs")
+        mp.spawn(main_worker, args=(args,), nprocs=args.world_size, join=True)
+    else:
+        print("Starting single GPU training")
+        main_worker(0, args)
 
 if __name__ == "__main__":
     main()

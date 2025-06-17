@@ -23,6 +23,7 @@ def get_headersandindex(input_str: str):
         "history of present illness",
         "past medical history",
         "social history",
+        "procedure",
         "family history",
         "physical exam",
         "pertinent results",
@@ -30,6 +31,7 @@ def get_headersandindex(input_str: str):
         "medications on admission",
         "discharge disposition",
         "discharge diagnosis",
+        "discharge diagnoses",
         "discharge condition",
         "discharge instructions",
         "followup instructions",
@@ -78,8 +80,10 @@ class TextLoader:
                 "major surgical or invasive procedure",
                 "history of present illness",
                 "past medical history",
+                "procedure",
                 "brief hospital course",
                 "discharge diagnosis",
+                "discharge diagnoses"
                 "discharge condition",
             ]
             headers_pos = [h for h in headers_pos if h[0] in keep_headers]
@@ -134,14 +138,12 @@ class LabelLoader:
     def num_labels(self) -> int:
         return len(self.codes)
 
-    def get_label_encodings(self) -> dict:
-        return self()
-
-    def __call__(self) -> dict:
+    def __call__(self) -> torch.Tensor:
         """
-        对所有标签描述做 tokenizer 编码并返回，
-        同时缓存到 self.input_ids / self.attention_mask
+        对所有标签描述做 tokenizer 编码并通过预训练模型计算 embedding，返回形状为
+        (num_labels, hidden_size) 的 Tensor。
         """
+        # 1. tokenize
         enc = self.tokenizer(
             self.descriptions,
             padding='max_length',
@@ -149,9 +151,16 @@ class LabelLoader:
             max_length=self.max_length,
             return_tensors='pt'
         )
-        self.input_ids = enc['input_ids']
-        self.attention_mask = enc['attention_mask']
-        return {'input_ids': self.input_ids, 'attention_mask': self.attention_mask}
+        input_ids = enc['input_ids']
+        attention_mask = enc['attention_mask']
+        # 2. 通过模型计算 embedding
+        with torch.no_grad():
+            outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
+            if hasattr(outputs, 'pooler_output'):
+                label_embs = outputs.pooler_output    # [num_labels, hidden_size]
+            else:
+                label_embs = outputs.last_hidden_state[:, 0]  # CLS token 表示
+        return label_embs
 
 
 def build_multihot_y(targets: list, code2idx: dict, num_labels: int) -> np.ndarray:
@@ -244,11 +253,10 @@ class SynonymLabelLoader(LabelLoader):
         self.term_count = term_count
         self.sort_method = sort_method
 
-    def __call__(self) -> dict:
+    def __call__(self) -> torch.Tensor:
         """
-        返回一个 dict：
-          'input_ids': Tensor[(num_labels * term_count), max_length]
-          'attention_mask': Tensor[(num_labels * term_count), max_length]
+        对每个标签（含同义词）做 tokenizer 编码并通过模型计算 embedding，返回形状为
+        (num_labels * term_count, hidden_size) 的 Tensor。
         """
         terms = []
         # 对每个 code 构建一个 [原始描述 + 同义词列表]
@@ -280,10 +288,16 @@ class SynonymLabelLoader(LabelLoader):
             max_length=self.max_length,
             return_tensors='pt'
         )
-        return {
-            'input_ids': enc['input_ids'],       # 形状: [num_labels*term_count, max_length]
-            'attention_mask': enc['attention_mask']
-        }
+        input_ids = enc['input_ids']         # [num_labels*term_count, max_length]
+        attention_mask = enc['attention_mask']
+        # 通过模型计算 embedding
+        with torch.no_grad():
+            outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
+            if hasattr(outputs, 'pooler_output'):
+                label_embs = outputs.pooler_output
+            else:
+                label_embs = outputs.last_hidden_state[:, 0]
+        return label_embs
 
 
 

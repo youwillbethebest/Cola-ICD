@@ -9,6 +9,7 @@ from typing import Dict
 from torch.amp import autocast
 from torch.amp import GradScaler
 import wandb
+import torch.distributed as dist
 
 class Trainer:
     """
@@ -30,7 +31,11 @@ class Trainer:
         output_dir: str = "checkpoints",
         best_metric_name: str = "map",
         use_amp: bool = False,
-        use_wandb: bool = False
+        use_wandb: bool = False,
+        use_ddp: bool = False,
+        rank: int = 0,
+        world_size: int = 1,
+        train_sampler = None
     ):
         self.model = model
         self.train_loader = train_loader
@@ -50,6 +55,10 @@ class Trainer:
         self.best_epoch = -1
         self.use_amp = use_amp
         self.use_wandb = use_wandb
+        self.use_ddp = use_ddp
+        self.rank = rank
+        self.world_size = world_size
+        self.train_sampler = train_sampler
         if self.use_amp:
             self.scaler = GradScaler("cuda")
         else:
@@ -65,17 +74,27 @@ class Trainer:
         self.on_train_end()
         self.test_begin("best_model.pt")
         self._validate_epoch("test")
-        print(f"Best validation {self.best_metric_name}: {self.best_metric:.4f} at epoch {self.best_epoch}")
+
+        # if not self.use_ddp or self.rank == 0:
+        #     print(f"Best validation {self.best_metric_name}: {self.best_metric:.4f} at epoch {self.best_epoch}")
 
     def _train_epoch(self):
         self.model.train()
-        pbar = tqdm(total=len(self.train_loader), desc=f"Training Epoch {self.current_epoch}/{self.epochs}")
+        
+        # DDP需要设置epoch来确保不同进程的数据采样顺序
+        if self.use_ddp and self.train_sampler is not None:
+            self.train_sampler.set_epoch(self.current_epoch)
+        
+        # 只在rank 0显示进度条
+        if self.rank == 0:
+            pbar = tqdm(total=len(self.train_loader), desc=f"Training Epoch {self.current_epoch}/{self.epochs}")
+        
         # 重置训练指标收集
         self.metrics["train"].reset_metrics()
         for step, (x_batch, y_batch) in enumerate(self.train_loader, 1):
             # 前向和 loss 计算
             outputs = self.training_step(x_batch, y_batch)
-            loss = outputs['loss']  # 直接使用原始 loss，不进行缩放
+            loss = outputs['loss']
             # 反向传播
             if self.use_amp:
                 self.scaler.scale(loss).backward()
@@ -95,7 +114,7 @@ class Trainer:
             # 在进度条中显示训练损失（原始 loss）
             
             # 手动更新进度条
-            if step % 500 == 0:
+            if step % 500 == 0 and self.rank == 0:
                 pbar.set_postfix({"train loss": float(outputs['loss'].item())})
                 pbar.update(500)
         # 训练 epoch 结束，打印训练集指标
@@ -111,19 +130,32 @@ class Trainer:
         self.model.eval()
         self.metrics[data_loader].reset_metrics()
         all_logits, all_targets = [], []
-        pbar=tqdm(total=len(loader),desc=f"{data_loader}")
+        pbar = tqdm(total=len(loader), desc=f"{data_loader}")
         with torch.no_grad():
             for step, (x_batch, y_batch) in enumerate(loader, 1):
-                # 执行验证前向并更新指标
                 outputs = self.validation_step(x_batch, y_batch)
-                self.update_metrics(outputs,loader_name=data_loader)
+                self.update_metrics(outputs, loader_name=data_loader)
                 all_logits.append(outputs['logits'])
                 all_targets.append(outputs['targets'])
                 if step % 500 == 0:
                     pbar.update(500)
-        all_logits = torch.cat(all_logits, dim=0)
-        all_targets = torch.cat(all_targets, dim=0)
-        self.on_val_end(all_logits, all_targets, loader_name=data_loader)
+        # 拼接本地预测与标签
+        local_logits = torch.cat(all_logits, dim=0)
+        local_targets = torch.cat(all_targets, dim=0)
+        if self.use_ddp:
+            # 跨进程收集所有 logits 和 targets
+            all_logits = self._gather_all(local_logits)
+            all_targets = self._gather_all(local_targets)
+            # 同步流式指标的累积计数器
+            self.metrics[data_loader].sync_counters()
+        else:
+            all_logits = local_logits
+            all_targets = local_targets
+
+        # 仅在主进程做完整指标计算／打印／保存
+        if self.use_ddp and self.rank != 0:
+            return
+        self.on_val_end(all_logits.cpu(), all_targets.cpu(), loader_name=data_loader)
         # 仅在 val 阶段保存最佳模型
         if data_loader == "val":
             best_tensor = self.metrics[data_loader].get_best_metric(self.best_metric_name)
@@ -142,16 +174,23 @@ class Trainer:
         """
         保存包含模型、优化器、调度器和AMP scaler的完整checkpoint。
         """
-        checkpoint = {
-            'epoch': self.current_epoch,
-            'model': self.model.state_dict(),
-            'optimizer': self.optimizer.state_dict(),
-            'scheduler': self.scheduler.state_dict(),
-        }
-        if self.use_amp and self.scaler is not None:
-            checkpoint['scaler'] = self.scaler.state_dict()
-        torch.save(checkpoint, save_path)
-        print(f"Saved checkpoint to {save_path}")
+        if self.rank == 0:  # 只在主进程保存
+            if self.use_ddp:
+                # DDP模型需要使用module来访问原始模型
+                model_state_dict = self.model.module.state_dict()
+            else:
+                model_state_dict = self.model.state_dict()
+            
+            checkpoint = {
+                'epoch': self.current_epoch,
+                'model': model_state_dict,
+                'optimizer': self.optimizer.state_dict(),
+                'scheduler': self.scheduler.state_dict(),
+            }
+            if self.use_amp and self.scaler is not None:
+                checkpoint['scaler'] = self.scaler.state_dict()
+            torch.save(checkpoint, save_path)
+            print(f"Saved checkpoint to {save_path}")
 
     def on_train_end(self):
         """
@@ -165,16 +204,27 @@ class Trainer:
         """
         每个训练 epoch 结束时调用，计算并打印训练集上的所有 batch_update 指标
         """
+        if self.use_ddp:
+            self.metrics["train"].sync_counters()
+        # 计算本地训练指标
         train_results = self.metrics["train"].compute()
         # 使用统一 log_dict 方法记录训练指标
-        self.log_dict({'train': train_results})
+        if not self.use_ddp or self.rank == 0:
+            self.log_dict({'train': train_results})
         # 重置以便下一阶段使用
         self.metrics["train"].reset_metrics()
 
     def test_begin(self,file_name:str)-> None:
         checkpoint_path = os.path.join(self.output_dir, file_name)
         checkpoint = torch.load(checkpoint_path)
-        self.model.load_state_dict(checkpoint['model'])
+        
+        # 处理DDP模型加载
+        if self.use_ddp:
+            # DDP模型需要访问原始模型来加载状态字典
+            self.model.module.load_state_dict(checkpoint['model'])
+        else:
+            self.model.load_state_dict(checkpoint['model'])
+        
         self.optimizer.load_state_dict(checkpoint['optimizer'])
         self.scheduler.load_state_dict(checkpoint['scheduler'])
         if self.use_amp and self.scaler is not None:
@@ -224,15 +274,15 @@ class Trainer:
         """
         打印并记录包含 'train'/'val' 子字典的嵌套指标
         """
-        logs = {}
-        for phase, m in nested_metrics.items():
-            metrics_items = {k: float(v) for k, v in m.items()}
-            # 打印到控制台
-            print(f"{phase} metrics:", metrics_items)
-            # 汇总代码到 logs
-            logs.update({f"{phase}/{k}": v for k, v in metrics_items.items()})
-        # 根据开关同步到 wandb
-        if self.use_wandb:
+        if self.use_wandb and self.rank == 0:
+            logs = {}
+            for phase, m in nested_metrics.items():
+                metrics_items = {k: float(v) for k, v in m.items()}
+                # 打印到控制台
+                print(f"{phase} metrics:", metrics_items)
+                # 汇总代码到 logs
+                logs.update({f"{phase}/{k}": v for k, v in metrics_items.items()})
+            # 根据开关同步到 wandb
             wandb.log(logs, step=self.current_epoch)
 
     def on_val_end(self, all_logits, all_targets, loader_name="val"):
@@ -243,3 +293,11 @@ class Trainer:
         # 使用统一 log_dict 方法记录验证指标
         self.log_dict({loader_name: results})
         self.metrics[loader_name].reset_metrics()
+
+    def _gather_all(self, tensor: torch.Tensor) -> torch.Tensor:
+        """
+        DDP环境下跨进程收集tensor并拼接，返回全量tensor
+        """
+        tensor_list = [torch.zeros_like(tensor) for _ in range(self.world_size)]
+        dist.all_gather(tensor_list, tensor)
+        return torch.cat(tensor_list, dim=0)

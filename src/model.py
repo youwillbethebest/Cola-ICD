@@ -29,18 +29,9 @@ class ClinicalLongformerLabelAttention(nn.Module):
             term_count=term_counts
         )
         self.num_labels = label_loader.num_labels
-        label_enc = label_loader()
-        with torch.no_grad():
-            label_outputs = label_loader.model(
-            input_ids=label_enc['input_ids'],
-            attention_mask=label_enc['attention_mask']
-            )
-            # pooler_output 或 CLS token 表示
-        if hasattr(label_outputs, 'pooler_output'):
-            label_embs = label_outputs.pooler_output  # (num_labels, H)
-        else:
-                # 获取每个标签的 [CLS] token 表示作为标签嵌入
-            label_embs = label_outputs.last_hidden_state[:, 0]  # (num_labels, H)
+        # 直接通过 loader 获取预计算好的标签 embedding
+        # 返回 shape: [num_labels * term_count, hidden_size]
+        label_embs = label_loader()
         # 注册标签嵌入
         self.register_buffer('label_embs', label_embs)
 
