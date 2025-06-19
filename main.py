@@ -7,7 +7,13 @@ import torch.multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data import DataLoader
-from transformers import get_linear_schedule_with_warmup
+from transformers import (
+    get_linear_schedule_with_warmup,
+    get_cosine_schedule_with_warmup,
+    get_cosine_with_hard_restarts_schedule_with_warmup,
+    get_polynomial_decay_schedule_with_warmup,
+    get_constant_schedule_with_warmup,
+)
 from torch.optim import AdamW
 from src.data_loader import TextLoader, LabelLoader, ICDMultiLabelDataset, SynonymLabelLoader
 from src.model import ClinicalLongformerLabelAttention
@@ -54,7 +60,39 @@ def parse_args():
     parser.add_argument("--use_ddp", action="store_true", default=False, help="Whether to use DDP for distributed training")
     parser.add_argument("--world_size", type=int, default=torch.cuda.device_count(), help="Number of GPUs to use for DDP")
     parser.add_argument("--threshold", type=float, default=0.37, help="Threshold for metrics")
+    parser.add_argument("--resume_checkpoint", type=str, default=None, help="Path to checkpoint for resuming training")
+    parser.add_argument("--scheduler_type", type=str, default="cosine", choices=["linear", "cosine", "cosine_restart", "polynomial", "constant"], help="Learning-rate scheduler strategy")
     return parser.parse_args()
+
+def build_scheduler(
+    optimizer: torch.optim.Optimizer,
+    scheduler_type: str,
+    num_warmup_steps: int,
+    num_training_steps: int,
+    *,
+    num_cycles: int = 1,
+    power: float = 2.0,
+):
+    if scheduler_type == "linear":
+        return get_linear_schedule_with_warmup(
+            optimizer, num_warmup_steps, num_training_steps
+        )
+    elif scheduler_type == "cosine":
+        return get_cosine_schedule_with_warmup(
+            optimizer, num_warmup_steps, num_training_steps
+        )
+    elif scheduler_type == "cosine_restart":
+        return get_cosine_with_hard_restarts_schedule_with_warmup(
+            optimizer, num_warmup_steps, num_training_steps, num_cycles=num_cycles
+        )
+    elif scheduler_type == "polynomial":
+        return get_polynomial_decay_schedule_with_warmup(
+            optimizer, num_warmup_steps, num_training_steps, power=power
+        )
+    elif scheduler_type == "constant":
+        return get_constant_schedule_with_warmup(optimizer, num_warmup_steps)
+    else:
+        raise ValueError(f"Unsupported scheduler type: {scheduler_type}")
 
 def main_worker(rank, args):
     """DDP训练的工作进程"""
@@ -144,9 +182,12 @@ def main_worker(rank, args):
     print("Setting up optimizer and scheduler...")
     optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     total_steps = (len(train_loader) // args.gradient_accumulation_steps) * args.epochs
-    scheduler = get_linear_schedule_with_warmup(optimizer,
-                                                num_warmup_steps=args.warmup_steps,
-                                                num_training_steps=total_steps)
+    scheduler = build_scheduler(
+        optimizer,
+        args.scheduler_type,
+        args.warmup_steps,
+        total_steps,
+    )
 
     criterion = nn.BCEWithLogitsLoss()
     print("Initializing metrics...")
@@ -206,7 +247,8 @@ def main_worker(rank, args):
         use_ddp=args.use_ddp,
         rank=rank if args.use_ddp else 0,
         world_size=args.world_size if args.use_ddp else 1,
-        train_sampler=train_sampler
+        train_sampler=train_sampler,
+        resume_checkpoint=args.resume_checkpoint
     )
     print("Training started")
     trainer.train()
@@ -217,10 +259,10 @@ def main_worker(rank, args):
 
 def main():
     args = parse_args()
-    
+    if not args.output_dir:
     # 为输出目录添加小时级时间戳，格式：YYYYMMDD_HH
-    timestamp = datetime.now().strftime("%Y%m%d_%H")
-    args.output_dir = os.path.join(args.output_dir, timestamp)
+        timestamp = datetime.now().strftime("%Y%m%d_%H")
+        args.output_dir = os.path.join(args.output_dir, timestamp)
 
     if args.use_ddp and torch.cuda.device_count() > 1:
         print(f"Starting DDP training on {args.world_size} GPUs")

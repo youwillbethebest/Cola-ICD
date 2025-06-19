@@ -35,7 +35,8 @@ class Trainer:
         use_ddp: bool = False,
         rank: int = 0,
         world_size: int = 1,
-        train_sampler = None
+        train_sampler = None,
+        resume_checkpoint: str = None
     ):
         self.model = model
         self.train_loader = train_loader
@@ -59,24 +60,64 @@ class Trainer:
         self.rank = rank
         self.world_size = world_size
         self.train_sampler = train_sampler
+        self.resume_checkpoint = resume_checkpoint
+        self.start_epoch = 1
         if self.use_amp:
             self.scaler = GradScaler("cuda")
         else:
             self.scaler = None
 
+    def load_checkpoint(self, checkpoint_path: str):
+        """
+        加载检查点以继续训练
+        """
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
+        
+        print(f"Loading checkpoint from {checkpoint_path}")
+        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        
+        # 加载模型状态
+        if self.use_ddp:
+            self.model.module.load_state_dict(checkpoint['model'])
+        else:
+            self.model.load_state_dict(checkpoint['model'])
+        
+        # 加载优化器状态
+        self.optimizer.load_state_dict(checkpoint['optimizer'])
+        
+        # 加载学习率调度器状态
+        self.scheduler.load_state_dict(checkpoint['scheduler'])
+        
+        # 加载AMP scaler状态
+        if self.use_amp and self.scaler is not None and 'scaler' in checkpoint:
+            self.scaler.load_state_dict(checkpoint['scaler'])
+        
+        # 设置开始的epoch
+        self.start_epoch = checkpoint['epoch'] + 1
+        
+        
+        print(f"Checkpoint loaded successfully. Resuming from epoch {self.start_epoch}")
+        return self.start_epoch
+
     def train(self):
         self.model.to(self.device)
-        for epoch in range(1, self.epochs + 1):
+        
+        # 如果指定了resume_checkpoint，加载检查点
+        if self.resume_checkpoint:
+            self.load_checkpoint(self.resume_checkpoint)
+        
+        # 从start_epoch开始训练
+        for epoch in range(self.start_epoch, self.epochs + 1):
             print(f"Epoch {epoch}/{self.epochs}")
             self.current_epoch = epoch
             self._train_epoch()
             self._validate_epoch("val")
-        self.on_train_end()
+        if self.epochs > 0:
+            self.on_train_end()
+        
         self.test_begin("best_model.pt")
         self._validate_epoch("test")
-
-        # if not self.use_ddp or self.rank == 0:
-        #     print(f"Best validation {self.best_metric_name}: {self.best_metric:.4f} at epoch {self.best_epoch}")
 
     def _train_epoch(self):
         self.model.train()
@@ -274,7 +315,7 @@ class Trainer:
         """
         打印并记录包含 'train'/'val' 子字典的嵌套指标
         """
-        if self.use_wandb and self.rank == 0:
+        if self.rank == 0:
             logs = {}
             for phase, m in nested_metrics.items():
                 metrics_items = {k: float(v) for k, v in m.items()}
@@ -283,7 +324,8 @@ class Trainer:
                 # 汇总代码到 logs
                 logs.update({f"{phase}/{k}": v for k, v in metrics_items.items()})
             # 根据开关同步到 wandb
-            wandb.log(logs, step=self.current_epoch)
+            if self.use_wandb:
+                wandb.log(logs)
 
     def on_val_end(self, all_logits, all_targets, loader_name="val"):
         """
