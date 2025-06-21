@@ -36,7 +36,10 @@ class Trainer:
         rank: int = 0,
         world_size: int = 1,
         train_sampler = None,
-        resume_checkpoint: str = None
+        resume_checkpoint: str = None,
+        early_stopping: bool = False,
+        early_stopping_patience: int = 3,
+        early_stopping_min_delta: float = 0.001
     ):
         self.model = model
         self.train_loader = train_loader
@@ -62,6 +65,11 @@ class Trainer:
         self.train_sampler = train_sampler
         self.resume_checkpoint = resume_checkpoint
         self.start_epoch = 1
+        self.early_stopping = early_stopping
+        self.early_stopping_patience = early_stopping_patience
+        self.early_stopping_min_delta = early_stopping_min_delta
+        self.early_stopping_counter = 0
+        self.early_stopping_triggered = False
         if self.use_amp:
             self.scaler = GradScaler("cuda")
         else:
@@ -113,6 +121,11 @@ class Trainer:
             self.current_epoch = epoch
             self._train_epoch()
             self._validate_epoch("val")
+            
+            # 检查早停条件
+            if self.early_stopping and self._should_early_stop():
+                break
+                
         if self.epochs > 0:
             self.on_train_end()
         
@@ -343,3 +356,35 @@ class Trainer:
         tensor_list = [torch.zeros_like(tensor) for _ in range(self.world_size)]
         dist.all_gather(tensor_list, tensor)
         return torch.cat(tensor_list, dim=0)
+
+    def _should_early_stop(self) -> bool:
+        """
+        检查是否应该触发早停
+        """
+        if not self.early_stopping:
+            return False
+            
+        # 只在主进程进行早停判断
+        if self.use_ddp and self.rank != 0:
+            return False
+            
+        # 获取当前验证指标
+        current_val_metric = self.metrics["val"].get_best_metric(self.best_metric_name)
+        if current_val_metric is None:
+            return False
+            
+        current_val = float(current_val_metric)
+        
+        # 如果这是第一次验证或者有显著改善
+        if self.best_metric is None or current_val > (self.best_metric + self.early_stopping_min_delta):
+            self.early_stopping_counter = 0
+            return False
+        else:
+            # 没有改善，增加计数器
+            self.early_stopping_counter += 1
+            
+            if self.early_stopping_counter >= self.early_stopping_patience:
+                self.early_stopping_triggered = True
+                return True
+                
+        return False

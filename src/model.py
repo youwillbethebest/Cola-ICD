@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+from typing import Optional
 from transformers import AutoModel
 from src.module import LabelAttention
 from src.data_loader import SynonymLabelLoader
@@ -14,29 +15,37 @@ class ClinicalLongformerLabelAttention(nn.Module):
     """
     def __init__(self,
                  longformer_path: str,
-                 codes_file: str,
+                 codes_file: str | None = None,
                  label_model_name: str = "Bio_ClinicalBERT",
-                 term_counts: int =1):
+                 term_counts: int = 1,
+                 label_loader: Optional[SynonymLabelLoader] = None):
         super().__init__()
         # 文本编码器
-        self.model= AutoModel.from_pretrained(longformer_path)
+        self.model = AutoModel.from_pretrained(longformer_path)
         hidden_size = self.model.config.hidden_size
 
-        # 标签加载与编码（使用 SynonymLabelLoader 支持同义词）
-        label_loader = SynonymLabelLoader(
-            codes_file=codes_file,
-            pretrained_model_name=label_model_name,
-            term_count=term_counts
-        )
-        self.num_labels = label_loader.num_labels
-        # 直接通过 loader 获取预计算好的标签 embedding
-        # 返回 shape: [num_labels * term_count, hidden_size]
-        label_embs = label_loader()
-        # 注册标签嵌入
-        self.register_buffer('label_embs', label_embs)
+        # ---------------- 标签加载 ----------------
+        if label_loader is None:          # 若外部未传入，则内部创建（保持兼容）
+            assert codes_file is not None, "当未提供 label_loader 时，必须指定 codes_file"
+            label_loader = SynonymLabelLoader(
+                codes_file=codes_file,
+                pretrained_model_name=label_model_name,
+                term_count=term_counts
+            )
 
-        # 标签感知注意力模块
-        self.attention = LabelAttention(attention_head=term_counts,rep_droupout_num=0.1,head_pooling="concat",att_dropout_num=0.1,attention_dim=hidden_size,num_labels=self.num_labels)
+        self.num_labels = label_loader.num_labels
+        label_embs = label_loader()       # 预计算标签嵌入
+        self.register_buffer("label_embs", label_embs)
+
+        # 标签感知注意力
+        self.attention = LabelAttention(
+            attention_head=term_counts,
+            rep_droupout_num=0.1,
+            head_pooling="concat",
+            att_dropout_num=0.1,
+            attention_dim=hidden_size,
+            num_labels=self.num_labels
+        )
         # 分类头
 
     def forward(self,   

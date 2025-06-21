@@ -52,7 +52,7 @@ def parse_args():
     parser.add_argument("--warmup_steps", type=int, default=0)
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--output_dir", type=str, default="checkpoints")
+    parser.add_argument("--output_dir", type=str, default=None)
     parser.add_argument("--best_metric_name", type=str, default="map", help="Metric name to select best model")
     parser.add_argument("--use_amp", action="store_true", default=True, help="Whether to use mixed precision training")
     parser.add_argument("--use_wandb", action="store_true", default=False, help="Whether to enable Weights & Biases logging")
@@ -62,6 +62,12 @@ def parse_args():
     parser.add_argument("--threshold", type=float, default=0.37, help="Threshold for metrics")
     parser.add_argument("--resume_checkpoint", type=str, default=None, help="Path to checkpoint for resuming training")
     parser.add_argument("--scheduler_type", type=str, default="cosine", choices=["linear", "cosine", "cosine_restart", "polynomial", "constant"], help="Learning-rate scheduler strategy")
+    
+    # 添加早停相关参数
+    parser.add_argument("--early_stopping_patience", type=int, default=7, help="Number of epochs to wait before early stopping if no improvement")
+    parser.add_argument("--early_stopping_min_delta", type=float, default=0.0001, help="Minimum change required to qualify as an improvement")
+    parser.add_argument("--early_stopping", action="store_true", default=True, help="Whether to use early stopping")
+    
     return parser.parse_args()
 
 def build_scheduler(
@@ -164,9 +170,8 @@ def main_worker(rank, args):
     print("Initializing model...")
     model = ClinicalLongformerLabelAttention(
         longformer_path=args.pretrained_model_name,
-        codes_file=args.codes_file,
-        label_model_name=args.label_model_name,
-        term_counts=args.term_count
+        term_counts=args.term_count,
+        label_loader=label_loader
     )
     
     model.to(device)
@@ -248,7 +253,10 @@ def main_worker(rank, args):
         rank=rank if args.use_ddp else 0,
         world_size=args.world_size if args.use_ddp else 1,
         train_sampler=train_sampler,
-        resume_checkpoint=args.resume_checkpoint
+        resume_checkpoint=args.resume_checkpoint,
+        early_stopping=args.early_stopping,
+        early_stopping_patience=args.early_stopping_patience,
+        early_stopping_min_delta=args.early_stopping_min_delta
     )
     print("Training started")
     trainer.train()
@@ -260,9 +268,9 @@ def main_worker(rank, args):
 def main():
     args = parse_args()
     if not args.output_dir:
-    # 为输出目录添加小时级时间戳，格式：YYYYMMDD_HH
+        # 为输出目录添加小时级时间戳，格式：YYYYMMDD_HH
         timestamp = datetime.now().strftime("%Y%m%d_%H")
-        args.output_dir = os.path.join(args.output_dir, timestamp)
+        args.output_dir = os.path.join("checkpoints", timestamp)
 
     if args.use_ddp and torch.cuda.device_count() > 1:
         print(f"Starting DDP training on {args.world_size} GPUs")
