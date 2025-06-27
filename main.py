@@ -59,14 +59,19 @@ def parse_args():
     parser.add_argument("--term_count",type=int, default=1, help="Whether to use synonym")
     parser.add_argument("--use_ddp", action="store_true", default=False, help="Whether to use DDP for distributed training")
     parser.add_argument("--world_size", type=int, default=torch.cuda.device_count(), help="Number of GPUs to use for DDP")
-    parser.add_argument("--threshold", type=float, default=0.37, help="Threshold for metrics")
+    parser.add_argument("--threshold", type=float, default=0.5, help="Threshold for metrics")
     parser.add_argument("--resume_checkpoint", type=str, default=None, help="Path to checkpoint for resuming training")
     parser.add_argument("--scheduler_type", type=str, default="cosine", choices=["linear", "cosine", "cosine_restart", "polynomial", "constant"], help="Learning-rate scheduler strategy")
     
     # 添加早停相关参数
-    parser.add_argument("--early_stopping_patience", type=int, default=7, help="Number of epochs to wait before early stopping if no improvement")
+    parser.add_argument("--early_stopping_patience", type=int, default=5, help="Number of epochs to wait before early stopping if no improvement")
     parser.add_argument("--early_stopping_min_delta", type=float, default=0.0001, help="Minimum change required to qualify as an improvement")
-    parser.add_argument("--early_stopping", action="store_true", default=True, help="Whether to use early stopping")
+    parser.add_argument("--early_stopping", action="store_true", default=False, help="Whether to use early stopping")
+    
+    parser.add_argument("--eval_codes_file", type=str, default=None,
+                        help="txt/json 列表文件；若给定则只在这些 code 上计算指标")
+    
+
     
     return parser.parse_args()
 
@@ -196,9 +201,29 @@ def main_worker(rank, args):
 
     criterion = nn.BCEWithLogitsLoss()
     print("Initializing metrics...")
+    
+    # ---------- 生成要评估的 code_indices ----------
+    if args.eval_codes_file:                 # 开关打开
+        # 支持 .txt 一行一个 code，也支持 json list
+        if args.eval_codes_file.endswith(".json"):
+            import json, pathlib
+            subset_codes = json.load(open(args.eval_codes_file))
+        else:
+            subset_codes = [l.strip() for l in open(args.eval_codes_file) if l.strip()]
+    else:                                    # 默认：把训练集实际出现过的 code 拿出来
+        subset_codes = list({str(c) for t in train_dataset.targets for c in t})
+
+    if subset_codes:                         # 显式传给 MetricCollection
+        code_indices = torch.tensor(
+            [label_loader.code2idx[c] for c in subset_codes if c in label_loader.code2idx],
+            dtype=torch.long
+        )
+    else:
+        code_indices = None
+
     metrics = {
-                "train":MetricCollection([LossMetric()]),
-                "val":MetricCollection([
+        "train": MetricCollection([LossMetric()]),          # 训练阶段通常不需要裁剪
+        "val":   MetricCollection([
                     Precision(number_of_classes=label_loader.num_labels, average="macro"),
                     Precision(number_of_classes=label_loader.num_labels, average="micro"),
                     F1Score(number_of_classes=label_loader.num_labels, average="macro"),
@@ -211,8 +236,8 @@ def main_worker(rank, args):
                     Precision_K(k=5),
                     MeanAveragePrecision(),
                     LossMetric()
-                ]),
-                "test":MetricCollection([
+                ], code_indices),     # 只评估这 50 个 code
+        "test":  MetricCollection([
                     Precision(number_of_classes=label_loader.num_labels, average="macro"),
                     Precision(number_of_classes=label_loader.num_labels, average="micro"),
                     F1Score(number_of_classes=label_loader.num_labels, average="macro"),
@@ -225,7 +250,7 @@ def main_worker(rank, args):
                     Precision_K(k=5),
                     MeanAveragePrecision(),
                     LossMetric()
-                ])
+                ], code_indices)
     }
 
     for mc in metrics.values():
@@ -256,7 +281,8 @@ def main_worker(rank, args):
         resume_checkpoint=args.resume_checkpoint,
         early_stopping=args.early_stopping,
         early_stopping_patience=args.early_stopping_patience,
-        early_stopping_min_delta=args.early_stopping_min_delta
+        early_stopping_min_delta=args.early_stopping_min_delta,
+
     )
     print("Training started")
     trainer.train()

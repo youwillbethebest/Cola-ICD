@@ -39,7 +39,7 @@ class Trainer:
         resume_checkpoint: str = None,
         early_stopping: bool = False,
         early_stopping_patience: int = 3,
-        early_stopping_min_delta: float = 0.001
+        early_stopping_min_delta: float = 0.001,
     ):
         self.model = model
         self.train_loader = train_loader
@@ -70,6 +70,12 @@ class Trainer:
         self.early_stopping_min_delta = early_stopping_min_delta
         self.early_stopping_counter = 0
         self.early_stopping_triggered = False
+        self.prev_best = None
+
+        self.best_db = 0.5
+        self.current_epoch = 0  # 初始化 current_epoch 属性
+
+
         if self.use_amp:
             self.scaler = GradScaler("cuda")
         else:
@@ -85,24 +91,20 @@ class Trainer:
         print(f"Loading checkpoint from {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
         
-        # 加载模型状态
         if self.use_ddp:
             self.model.module.load_state_dict(checkpoint['model'])
         else:
             self.model.load_state_dict(checkpoint['model'])
         
-        # 加载优化器状态
         self.optimizer.load_state_dict(checkpoint['optimizer'])
         
-        # 加载学习率调度器状态
         self.scheduler.load_state_dict(checkpoint['scheduler'])
         
-        # 加载AMP scaler状态
         if self.use_amp and self.scaler is not None and 'scaler' in checkpoint:
             self.scaler.load_state_dict(checkpoint['scaler'])
         
-        # 设置开始的epoch
         self.start_epoch = checkpoint['epoch'] + 1
+        self.best_db = checkpoint.get('db', 0.5)  # 如果检查点中没有'db'键，使用默认值0.5
         
         
         print(f"Checkpoint loaded successfully. Resuming from epoch {self.start_epoch}")
@@ -111,11 +113,9 @@ class Trainer:
     def train(self):
         self.model.to(self.device)
         
-        # 如果指定了resume_checkpoint，加载检查点
         if self.resume_checkpoint:
             self.load_checkpoint(self.resume_checkpoint)
         
-        # 从start_epoch开始训练
         for epoch in range(self.start_epoch, self.epochs + 1):
             print(f"Epoch {epoch}/{self.epochs}")
             self.current_epoch = epoch
@@ -129,32 +129,29 @@ class Trainer:
         if self.epochs > 0:
             self.on_train_end()
         
+        print("\n=== 最终模型评估 ===")
         self.test_begin("best_model.pt")
+        self._validate_epoch("val", evaluating_best_model=True)
         self._validate_epoch("test")
+        self.on_test_end()
 
     def _train_epoch(self):
         self.model.train()
         
-        # DDP需要设置epoch来确保不同进程的数据采样顺序
         if self.use_ddp and self.train_sampler is not None:
             self.train_sampler.set_epoch(self.current_epoch)
         
-        # 只在rank 0显示进度条
         if self.rank == 0:
             pbar = tqdm(total=len(self.train_loader), desc=f"Training Epoch {self.current_epoch}/{self.epochs}")
         
-        # 重置训练指标收集
         self.metrics["train"].reset_metrics()
         for step, (x_batch, y_batch) in enumerate(self.train_loader, 1):
-            # 前向和 loss 计算
             outputs = self.training_step(x_batch, y_batch)
             loss = outputs['loss']
-            # 反向传播
             if self.use_amp:
                 self.scaler.scale(loss).backward()
             else:
                 loss.backward()
-            # 优化器和调度器更新
             if step % self.grad_acc_steps == 0 or step == len(self.train_loader):
                 if self.use_amp:
                     self.scaler.step(self.optimizer)
@@ -163,18 +160,14 @@ class Trainer:
                     self.optimizer.step()
                 self.scheduler.step()
                 self.optimizer.zero_grad()
-            # 更新指标（使用原始 loss）
             self.update_metrics(outputs,loader_name="train")
-            # 在进度条中显示训练损失（原始 loss）
             
-            # 手动更新进度条
             if step % 500 == 0 and self.rank == 0:
                 pbar.set_postfix({"train loss": float(outputs['loss'].item())})
                 pbar.update(500)
-        # 训练 epoch 结束，打印训练集指标
         self.on_train_epoch_end()
 
-    def _validate_epoch(self, data_loader="val"):
+    def _validate_epoch(self, data_loader="val", evaluating_best_model=False):
         if data_loader == "val":
             loader = self.val_loader
         elif data_loader == "train":
@@ -193,14 +186,12 @@ class Trainer:
                 all_targets.append(outputs['targets'])
                 if step % 500 == 0:
                     pbar.update(500)
-        # 拼接本地预测与标签
+        
         local_logits = torch.cat(all_logits, dim=0)
         local_targets = torch.cat(all_targets, dim=0)
         if self.use_ddp:
-            # 跨进程收集所有 logits 和 targets
             all_logits = self._gather_all(local_logits)
             all_targets = self._gather_all(local_targets)
-            # 同步流式指标的累积计数器
             self.metrics[data_loader].sync_counters()
         else:
             all_logits = local_logits
@@ -209,9 +200,9 @@ class Trainer:
         # 仅在主进程做完整指标计算／打印／保存
         if self.use_ddp and self.rank != 0:
             return
-        self.on_val_end(all_logits.cpu(), all_targets.cpu(), loader_name=data_loader)
+        self.on_val_end(all_logits.cpu(), all_targets.cpu(), loader_name=data_loader,evaluating_best_model=evaluating_best_model)
         # 仅在 val 阶段保存最佳模型
-        if data_loader == "val":
+        if data_loader == "val" and not evaluating_best_model:
             best_tensor = self.metrics[data_loader].get_best_metric(self.best_metric_name)
             if best_tensor is not None:
                 best_val = float(best_tensor)
@@ -221,16 +212,13 @@ class Trainer:
                     save_path = os.path.join(self.output_dir, "best_model.pt")
                     self.save_checkpoint(save_path)
                     print(f"Saved best model to {save_path} ({self.best_metric_name}: {self.best_metric:.4f})")
-        # 统一交给回调：计算/打印/重置
-        
 
     def save_checkpoint(self, save_path: str):
         """
         保存包含模型、优化器、调度器和AMP scaler的完整checkpoint。
         """
-        if self.rank == 0:  # 只在主进程保存
+        if self.rank == 0:
             if self.use_ddp:
-                # DDP模型需要使用module来访问原始模型
                 model_state_dict = self.model.module.state_dict()
             else:
                 model_state_dict = self.model.state_dict()
@@ -240,6 +228,7 @@ class Trainer:
                 'model': model_state_dict,
                 'optimizer': self.optimizer.state_dict(),
                 'scheduler': self.scheduler.state_dict(),
+                'db':self.best_db
             }
             if self.use_amp and self.scaler is not None:
                 checkpoint['scaler'] = self.scaler.state_dict()
@@ -253,6 +242,11 @@ class Trainer:
         save_path = os.path.join(self.output_dir, f"final_model.pt")
         self.save_checkpoint(save_path)
         print(f"Saved final model to {save_path}")
+    
+    def on_test_end(self):
+        save_path = os.path.join(self.output_dir, f"best_model_tuned.pt")
+        self.save_checkpoint(save_path)
+        print(f"Saved best model tuned to {save_path}")
 
     def on_train_epoch_end(self):
         """
@@ -260,27 +254,23 @@ class Trainer:
         """
         if self.use_ddp:
             self.metrics["train"].sync_counters()
-        # 计算本地训练指标
         train_results = self.metrics["train"].compute()
-        # 使用统一 log_dict 方法记录训练指标
         if not self.use_ddp or self.rank == 0:
             self.log_dict({'train': train_results})
-        # 重置以便下一阶段使用
         self.metrics["train"].reset_metrics()
 
     def test_begin(self,file_name:str)-> None:
         checkpoint_path = os.path.join(self.output_dir, file_name)
         checkpoint = torch.load(checkpoint_path)
         
-        # 处理DDP模型加载
         if self.use_ddp:
-            # DDP模型需要访问原始模型来加载状态字典
             self.model.module.load_state_dict(checkpoint['model'])
         else:
             self.model.load_state_dict(checkpoint['model'])
         
         self.optimizer.load_state_dict(checkpoint['optimizer'])
         self.scheduler.load_state_dict(checkpoint['scheduler'])
+        self.best_db = checkpoint.get('db', 0.5)  # 如果检查点中没有'db'键，使用默认值0.5
         if self.use_amp and self.scaler is not None:
             self.scaler.load_state_dict(checkpoint['scaler'])
         print(f"Loaded model from {checkpoint_path}")
@@ -310,7 +300,6 @@ class Trainer:
         attention_mask = x_batch['attention_mask'].to(self.device)
         y_true = y_batch.to(self.device)
         logits = self.model(input_ids=input_ids, attention_mask=attention_mask)
-        # 计算验证集的 loss
         loss = self.criterion(logits, y_true)
         probs = torch.sigmoid(logits)
         return {'loss': loss, 'logits': probs, 'targets': y_true}
@@ -319,7 +308,6 @@ class Trainer:
         """
         将 outputs 中的 loss、logits、targets 传给 metrics 集合
         """
-        # 直接使用原始 loss，不需要恢复
         if 'loss' in outputs:
             outputs['loss'] = outputs['loss'].detach()
         self.metrics[loader_name].update(outputs)
@@ -332,19 +320,22 @@ class Trainer:
             logs = {}
             for phase, m in nested_metrics.items():
                 metrics_items = {k: float(v) for k, v in m.items()}
-                # 打印到控制台
                 print(f"{phase} metrics:", metrics_items)
-                # 汇总代码到 logs
                 logs.update({f"{phase}/{k}": v for k, v in metrics_items.items()})
-            # 根据开关同步到 wandb
             if self.use_wandb:
                 wandb.log(logs)
 
-    def on_val_end(self, all_logits, all_targets, loader_name="val"):
+    def on_val_end(self, all_logits, all_targets, loader_name="val", evaluating_best_model=False):
         """
         评估结束时调用，计算完整 logits/targets 并打印 loader_name 指标，然后重置
         """
         results = self.metrics[loader_name].compute(logits=all_logits.cpu(), targets=all_targets.cpu())
+        if  evaluating_best_model and loader_name == "val":
+            best_f1, best_db = self.f1_score_db_tuning(all_logits, all_targets)
+            self.best_db = best_db
+            print(f"Best F1: {best_f1:.4f}")
+            print(f"Best DB: {best_db:.4f}")
+            self.metrics["test"].set_threshold(best_db)
         # 使用统一 log_dict 方法记录验证指标
         self.log_dict({loader_name: results})
         self.metrics[loader_name].reset_metrics()
@@ -364,27 +355,53 @@ class Trainer:
         if not self.early_stopping:
             return False
             
-        # 只在主进程进行早停判断
         if self.use_ddp and self.rank != 0:
             return False
             
-        # 获取当前验证指标
-        current_val_metric = self.metrics["val"].get_best_metric(self.best_metric_name)
-        if current_val_metric is None:
+        best_metric = self.metrics["val"].get_best_metric(self.best_metric_name)
+        if best_metric is None:
             return False
             
-        current_val = float(current_val_metric)
+        best_val = float(best_metric)
         
-        # 如果这是第一次验证或者有显著改善
-        if self.best_metric is None or current_val > (self.best_metric + self.early_stopping_min_delta):
+        if self.prev_best is None or best_val > (self.prev_best + self.early_stopping_min_delta):
             self.early_stopping_counter = 0
+            self.prev_best = best_val
             return False
         else:
-            # 没有改善，增加计数器
             self.early_stopping_counter += 1
             
             if self.early_stopping_counter >= self.early_stopping_patience:
                 self.early_stopping_triggered = True
+                print(f"Early stopping: {self.early_stopping_counter} epochs without improvement for {self.best_metric_name}")
                 return True
                 
         return False
+    
+    def f1_score_db_tuning(self,logits, targets, average="micro", type="single"):
+        if average not in ["micro", "macro"]:
+            raise ValueError("Average must be either 'micro' or 'macro'")
+        dbs = torch.linspace(0, 1, 100)
+        tp = torch.zeros((len(dbs), targets.shape[1]))
+        fp = torch.zeros((len(dbs), targets.shape[1]))
+        fn = torch.zeros((len(dbs), targets.shape[1]))
+        for idx, db in enumerate(dbs):
+            predictions = (logits > db).long()
+            tp[idx] = torch.sum((predictions) * (targets), dim=0)
+            fp[idx] = torch.sum(predictions * (1 - targets), dim=0)
+            fn[idx] = torch.sum((1 - predictions) * targets, dim=0)
+        if average == "micro":
+            f1_scores = tp.sum(1) / (tp.sum(1) + 0.5 * (fp.sum(1) + fn.sum(1)) + 1e-10)
+        else:
+            f1_scores = torch.mean(tp / (tp + 0.5 * (fp + fn) + 1e-10), dim=1)
+        if type == "single":
+            best_f1 = f1_scores.max()
+            best_db = dbs[f1_scores.argmax()]
+            print(f"Best F1: {best_f1:.4f} at DB: {best_db:.4f}")
+            return best_f1, best_db
+        if type == "per_class":
+            best_f1 = f1_scores.max(1)
+            best_db = dbs[f1_scores.argmax(0)]
+            print(f"Best F1: {best_f1} at DB: {best_db}")
+            return best_f1, best_db
+    

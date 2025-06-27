@@ -170,8 +170,12 @@ def build_multihot_y(targets: list, code2idx: dict, num_labels: int) -> np.ndarr
     y = np.zeros((len(targets), num_labels), dtype=np.float32)
     for i, codes in enumerate(targets):
         for c in codes:
-            idx = code2idx[str(c)]
-            y[i, idx] = 1.0
+            code_str = str(c)
+            if code_str in code2idx:
+                idx = code2idx[code_str]
+                y[i, idx] = 1.0
+            else:
+                print(f"警告: 代码 '{code_str}' 不在标签字典中，将被跳过")
     return y
 
 
@@ -184,7 +188,11 @@ class MultiHotLoader:
     def __call__(self, codes: list) -> np.ndarray:
         y = np.zeros(self.num_labels, dtype=np.float32)
         for c in codes:
-            y[self.code2idx[str(c)]] = 1.0
+            code_str = str(c)
+            if code_str in self.code2idx:
+                y[self.code2idx[code_str]] = 1.0
+            else:
+                print(f"警告: 代码 '{code_str}' 不在标签字典中，将被跳过")
         return y
 
 
