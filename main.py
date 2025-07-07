@@ -21,6 +21,7 @@ from src.metric import MetricCollection, Precision, Recall, F1Score, MeanAverage
 from src.trainer import Trainer
 import wandb
 from datetime import datetime
+from src.module import JaccardWeightedSupConLoss, LabelWiseContrastiveLoss
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -71,8 +72,27 @@ def parse_args():
     parser.add_argument("--eval_codes_file", type=str, default=None,
                         help="txt/json 列表文件；若给定则只在这些 code 上计算指标")
     
+    # ---- 对比学习相关参数 ----
+    parser.add_argument("--use_contrastive", action="store_true", default=False,
+                        help="是否启用对比学习")
+    parser.add_argument("--contrastive_loss_weight", type=float, default=0.1,
+                        help="对比学习的损失权重")
+    parser.add_argument("--contrastive_temperature", type=float, default=0.1,
+                        help="对比学习的温度 τ (for LabelWiseContrastiveLoss)")
 
-    
+    # ---- GNN和共现矩阵相关参数 ----
+    parser.add_argument("--use_gnn", action="store_true", default=False,
+                        help="是否启用GNN更新标签嵌入")
+    parser.add_argument("--adj_matrix_mode", type=str, default="ppmi", 
+                        choices=["binary", "count", "ppmi"],
+                        help="邻接矩阵构建模式")
+    parser.add_argument("--adj_matrix_topk", type=int, default=20,
+                        help="邻接矩阵每行保留的边数 topk")
+    parser.add_argument("--adj_matrix_self_loop", action="store_true", default=True,
+                        help="是否在邻接矩阵中添加自环")
+    parser.add_argument("--adj_matrix_device", type=str, default="cpu",
+                        help="构建邻接矩阵时使用的设备")
+
     return parser.parse_args()
 
 def build_scheduler(
@@ -173,10 +193,30 @@ def main_worker(rank, args):
         pin_memory=True
     )
     print("Initializing model...")
+    
+    # 构建邻接矩阵（如果启用GNN）
+    adj_matrix = None
+    if args.use_gnn:
+        print("Building adjacency matrix for GNN...")
+        from src.data_loader import build_adj_matrix
+        edge_index, edge_weight = build_adj_matrix(
+            dataset=train_dataset,
+            num_labels=label_loader.num_labels,
+            term_count=args.term_count,
+            mode=args.adj_matrix_mode,
+            add_self_loop=args.adj_matrix_self_loop,
+            topk=args.adj_matrix_topk,
+            device=args.adj_matrix_device
+        )
+        adj_matrix = (edge_index, edge_weight)
+        print(f"Adjacency matrix shape: {edge_index.shape}, {edge_weight.shape}")
+    
     model = ClinicalLongformerLabelAttention(
         longformer_path=args.pretrained_model_name,
         term_counts=args.term_count,
-        label_loader=label_loader
+        label_loader=label_loader,
+        use_gnn=args.use_gnn,
+        adj_matrix=adj_matrix
     )
     
     model.to(device)
@@ -200,6 +240,15 @@ def main_worker(rank, args):
     )
 
     criterion = nn.BCEWithLogitsLoss()
+    if args.use_contrastive:
+        print("Contrastive learning enabled (Label-Wise).")
+        contrastive_criterion = LabelWiseContrastiveLoss(
+            temperature=args.contrastive_temperature,
+            neg_samples=100
+        )
+    else:
+        print("Contrastive learning disabled.")
+        contrastive_criterion = None
     print("Initializing metrics...")
     
     # ---------- 生成要评估的 code_indices ----------
@@ -269,6 +318,8 @@ def main_worker(rank, args):
         metrics=metrics,
         device=device,
         epochs=args.epochs,
+        contrastive_criterion=contrastive_criterion,
+        contrastive_loss_weight=args.contrastive_loss_weight,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         output_dir=args.output_dir,
         best_metric_name=args.best_metric_name,

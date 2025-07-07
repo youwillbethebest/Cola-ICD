@@ -4,6 +4,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from transformers import AutoTokenizer, AutoModel
 from tqdm import tqdm
+import torch.nn.functional as F
 import json
 import random
 import re
@@ -211,6 +212,7 @@ class ICDMultiLabelDataset(Dataset):
         targets = df['target'].tolist()
         self.texts = texts
         self.targets = targets
+        self.df = df  # 保存原始DataFrame以便访问split等列
         self.text_loader = text_loader
         self.code2idx = label_loader.code2idx
         self.num_labels = label_loader.num_labels
@@ -306,6 +308,83 @@ class SynonymLabelLoader(LabelLoader):
             else:
                 label_embs = outputs.last_hidden_state[:, 0]
         return label_embs
+    
+def build_adj_matrix(dataset, num_labels: int, term_count: int = 1,
+                     mode: str = "ppmi", add_self_loop: bool = True,
+                     topk: int = 20, device: str = "cpu") -> tuple[torch.LongTensor, torch.FloatTensor]:
+    """
+    构建稀疏标签共现图 edge_index 和 edge_weight，适用于 GATConv。
+
+    Args:
+      dataset: 包含 df['split'], df['target'] 多热向量 (N, C)
+      num_labels: 标签总数 C
+      term_count: 同义词数 k
+      mode: "binary"/"count"/"ppmi"
+      add_self_loop: 是否添加自环
+      topk: 每行保留 topk 边
+      device: 'cpu' or 'cuda'
+
+    Returns:
+      edge_index: torch.LongTensor [2, E]
+      edge_weight: torch.FloatTensor [E]
+    """
+    # 1) 过滤生成样本
+    df = dataset.df
+    if 'split' in df.columns:
+        df = df[df['split'] != 'generate']
+    # 2) 聚合标签矩阵：先把每行 code 列表转成长度为 C 的 multi-hot 向量
+    targets = df['target'].tolist()  # List[List[code_str]]
+    # build_multihot_y 已在本文件中定义，返回 shape=(N, C) 的 np.ndarray
+    labels_np = build_multihot_y(targets, dataset.code2idx, num_labels)  # (N, C)
+    L = torch.from_numpy(labels_np).float().to(device)  # (N, C)
+
+    # 3) 计算共现矩阵
+    co_occ = L.t() @ L                                  # (C, C)
+
+    # 4) 构造初步权重矩阵
+    if mode == 'binary':
+        W = (co_occ > 0).float()
+    elif mode == 'count':
+        W = co_occ
+    elif mode == 'ppmi':
+        N = L.size(0)
+        p_ij = co_occ / N
+        p_i  = co_occ.diag() / N
+        pmi  = torch.log(p_ij / (p_i.unsqueeze(1) * p_i.unsqueeze(0) + 1e-9) + 1e-9)
+        W    = F.relu(pmi)
+        # 增加阈值筛选，只保留大于0.1的边
+        W = W.masked_fill(W < 0.1, 0.0)
+    else:
+        raise ValueError(f"Unknown mode: {mode}")
+
+    # 5) top-k 稀疏化
+    C = num_labels
+    vals, idx = torch.topk(W, k=topk, dim=1)            # (C, topk)
+    row = torch.arange(C, device=device).unsqueeze(1).repeat(1, topk).reshape(-1)
+    col = idx.reshape(-1)
+    weight = vals.reshape(-1)
+
+    # 6) 同义词扩展
+    if term_count > 1:
+        k = term_count
+        offsets = torch.arange(k, device=device)
+        row = (row.unsqueeze(1) * k + offsets).reshape(-1)
+        col = (col.unsqueeze(1) * k + offsets).reshape(-1)
+        weight = weight.unsqueeze(1).repeat(1, k).reshape(-1)
+        N = C * k
+    else:
+        N = C
+
+    # 7) 添加自环
+    edge_index = torch.stack([row, col], dim=0)          # (2, E)
+    edge_weight = weight                                # (E,)
+    if add_self_loop:
+        loops = torch.arange(N, device=device)
+        self_loop_idx = torch.stack([loops, loops], dim=0)
+        edge_index = torch.cat([edge_index, self_loop_idx], dim=1)
+        edge_weight = torch.cat([edge_weight, torch.ones(N, device=device)], dim=0)
+
+    return edge_index, edge_weight
 
 
 

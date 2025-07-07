@@ -27,6 +27,8 @@ class Trainer:
         metrics: Dict[str, MetricCollection],
         device: torch.device,
         epochs: int,
+        contrastive_criterion: nn.Module = None,
+        contrastive_loss_weight: float = 0.0,
         gradient_accumulation_steps: int = 1,
         output_dir: str = "checkpoints",
         best_metric_name: str = "map",
@@ -51,6 +53,8 @@ class Trainer:
         self.metrics = metrics
         self.device = device
         self.epochs = epochs
+        self.contrastive_criterion = contrastive_criterion
+        self.contrastive_loss_weight = contrastive_loss_weight
         self.grad_acc_steps = gradient_accumulation_steps
         self.output_dir = output_dir
         self.best_metric_name = best_metric_name
@@ -284,11 +288,21 @@ class Trainer:
         y_true = y_batch.to(self.device)
         if self.use_amp:
             with autocast('cuda'):
-                logits = self.model(input_ids=input_ids, attention_mask=attention_mask)
-                loss = self.criterion(logits, y_true)  
+                logits, per_label_text_feat, label_proto = self.model(input_ids=input_ids, attention_mask=attention_mask)
+                classification_loss = self.criterion(logits, y_true)  
+                if self.contrastive_criterion is not None and self.contrastive_loss_weight > 0:
+                    loss_cl = self.contrastive_criterion(per_label_text_feat, label_proto,y_true)
+                    loss = classification_loss + self.contrastive_loss_weight * loss_cl
+                else:
+                    loss = classification_loss
         else:
-            logits = self.model(input_ids=input_ids, attention_mask=attention_mask)
-            loss = self.criterion(logits, y_true) 
+            logits, per_label_text_feat, label_proto = self.model(input_ids=input_ids, attention_mask=attention_mask)
+            classification_loss = self.criterion(logits, y_true)  
+            if self.contrastive_criterion is not None and self.contrastive_loss_weight > 0:
+                    loss_cl = self.contrastive_criterion(per_label_text_feat, label_proto,y_true)
+                    loss = classification_loss + self.contrastive_loss_weight * loss_cl
+            else:
+                    loss = classification_loss
         logits = torch.sigmoid(logits) 
         return {'loss': loss, 'logits': logits, 'targets': y_true}
 
@@ -299,7 +313,7 @@ class Trainer:
         input_ids = x_batch['input_ids'].to(self.device)
         attention_mask = x_batch['attention_mask'].to(self.device)
         y_true = y_batch.to(self.device)
-        logits = self.model(input_ids=input_ids, attention_mask=attention_mask)
+        logits, per_label_text_feat, label_proto = self.model(input_ids=input_ids, attention_mask=attention_mask)
         loss = self.criterion(logits, y_true)
         probs = torch.sigmoid(logits)
         return {'loss': loss, 'logits': probs, 'targets': y_true}
