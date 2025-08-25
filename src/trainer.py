@@ -10,6 +10,7 @@ from torch.amp import autocast
 from torch.amp import GradScaler
 import wandb
 import torch.distributed as dist
+import pandas as pd  # 新增，用于保存 feather 文件
 
 class Trainer:
     """
@@ -216,6 +217,10 @@ class Trainer:
                     save_path = os.path.join(self.output_dir, "best_model.pt")
                     self.save_checkpoint(save_path)
                     print(f"Saved best model to {save_path} ({self.best_metric_name}: {self.best_metric:.4f})")
+        # 在测试集上保存预测结果
+        if data_loader == "test" and (not self.use_ddp or self.rank == 0):
+            # 保存二值化预测到 feather 文件
+            self._save_predictions(all_logits, loader.dataset)
 
     def save_checkpoint(self, save_path: str):
         """
@@ -245,7 +250,15 @@ class Trainer:
         """
         save_path = os.path.join(self.output_dir, f"final_model.pt")
         self.save_checkpoint(save_path)
-        print(f"Saved final model to {save_path}")
+        if self.use_wandb and (not self.use_ddp or self.rank == 0):
+            best_path = os.path.join(self.output_dir, f"best_model.pt")
+            best_artifact = wandb.Artifact(
+                name="Attentionicd-best-model",      # 在 WandB 上的 artifact 名称
+                type="model",                        # artifact 类型
+                description="best checkpoint"
+            )
+            best_artifact.add_file(best_path)
+            wandb.log_artifact(best_artifact)
     
     def on_test_end(self):
         save_path = os.path.join(self.output_dir, f"best_model_tuned.pt")
@@ -291,16 +304,20 @@ class Trainer:
                 logits, per_label_text_feat, label_proto = self.model(input_ids=input_ids, attention_mask=attention_mask)
                 classification_loss = self.criterion(logits, y_true)  
                 if self.contrastive_criterion is not None and self.contrastive_loss_weight > 0:
-                    loss_cl = self.contrastive_criterion(per_label_text_feat, label_proto,y_true)
-                    loss = classification_loss + self.contrastive_loss_weight * loss_cl
+                    self.loss_cl = self.contrastive_criterion(per_label_text_feat, label_proto,y_true)
+                    loss = classification_loss + self.contrastive_loss_weight * self.loss_cl
+                    if self.rank == 0 and self.use_wandb:
+                        wandb.log({"train/contrastive_loss": self.loss_cl.item()})
                 else:
                     loss = classification_loss
         else:
             logits, per_label_text_feat, label_proto = self.model(input_ids=input_ids, attention_mask=attention_mask)
             classification_loss = self.criterion(logits, y_true)  
             if self.contrastive_criterion is not None and self.contrastive_loss_weight > 0:
-                    loss_cl = self.contrastive_criterion(per_label_text_feat, label_proto,y_true)
-                    loss = classification_loss + self.contrastive_loss_weight * loss_cl
+                    self.loss_cl = self.contrastive_criterion(per_label_text_feat, label_proto,y_true)
+                    loss = classification_loss + self.contrastive_loss_weight * self.loss_cl
+                    if self.rank == 0 and self.use_wandb:
+                        wandb.log({"train/contrastive_loss": self.loss_cl.item()})
             else:
                     loss = classification_loss
         logits = torch.sigmoid(logits) 
@@ -418,4 +435,39 @@ class Trainer:
             best_db = dbs[f1_scores.argmax(0)]
             print(f"Best F1: {best_f1} at DB: {best_db}")
             return best_f1, best_db
+
+    # ------------------------------------------------------------------
+    # 新增：保存预测结果
+    def _save_predictions(self, logits: torch.Tensor, dataset, save_name: str = "test_predictions.feather"):
+        """
+        将测试集预测结果按 best_db 阈值二值化后，与原始 text、target 一并保存为 feather 文件。
+        - logits: sigmoid 后的概率张量，形状 (n_samples, num_labels)
+        - dataset: ICDMultiLabelDataset，对应测试集，用于获取 text 和 target 原始信息
+        - save_name: 保存文件名，默认 test_predictions.feather
+        """
+        if len(logits) != len(dataset):
+            raise ValueError("logits 行数与 dataset 大小不一致，无法对齐保存预测结果")
+
+        # 1. 二值化预测
+        preds = (logits > self.best_db).int().cpu().numpy()  # shape (n_samples, num_labels)
+
+        # 2. 构造 code 列顺序（idx -> code）
+        idx2code = {idx: code for code, idx in dataset.code2idx.items()}
+        codes_sorted = [idx2code[idx] for idx in range(len(idx2code))]
+
+        # 3. 组装 DataFrame
+        data_dict = {
+            "text": dataset.texts,
+            "target": dataset.targets,  # 使用分号连接保存原始多标签列表
+        }
+        # 为每个 code 添加预测列
+        for idx, code in enumerate(codes_sorted):
+            data_dict[code] = preds[:, idx]
+
+        df_pred = pd.DataFrame(data_dict)
+
+        # 4. 保存 feather
+        save_path = os.path.join(self.output_dir, save_name)
+        df_pred.to_feather(save_path)
+        print(f"Saved predictions to {save_path} (阈值: {self.best_db:.4f})")
     

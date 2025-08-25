@@ -386,5 +386,60 @@ def build_adj_matrix(dataset, num_labels: int, term_count: int = 1,
 
     return edge_index, edge_weight
 
+# ---------------- 新增：ICD9 层级推断 & 构图 ----------------
+def _infer_parent(code: str, code_set: set[str]) -> str | None:
+    """
+    基于 ICD-9 代码字符串前缀推断最近父级：
+    - 逐步去掉末尾字符；若末尾是 '.' 则一并去掉；
+    - 一旦得到的前缀在 code_set 中，返回该前缀作为最近父级；
+    - 找不到则返回 None。
+    """
+    cand = code.strip()
+    while len(cand) > 1:
+        cand = cand[:-1]
+        if cand.endswith('.'):
+            cand = cand[:-1]
+        if cand in code_set:
+            return cand
+    return None
+
+def build_hierarchy_edges(code2idx: dict, direction: str = "parent_to_child") -> torch.LongTensor:
+    """
+    构建 1-hop 层级边（代码级节点）：
+    - direction = 'parent_to_child' 或 'child_to_parent'
+    - 仅返回 edge_index（权重默认为 1，下游可选用）
+    """
+    codes = list(code2idx.keys())
+    code_set = set(codes)
+    rows, cols = [], []
+    for c in codes:
+        p = _infer_parent(c, code_set)
+        if p is None:
+            continue
+        ci = code2idx[c]
+        pi = code2idx[p]
+        if direction == "parent_to_child":
+            rows.append(pi); cols.append(ci)
+        else:
+            rows.append(ci); cols.append(pi)
+    if len(rows) == 0:
+        return torch.zeros((2, 0), dtype=torch.long)
+    return torch.tensor([rows, cols], dtype=torch.long)
+
+def build_hierarchy_adjs(code2idx: dict, device: str = "cpu") -> dict:
+    """
+    返回用于消息传递的双向邻接（不含自环；残差在GNN内部做）：
+      - 'up':   child→parent
+      - 'down': parent→child
+    """
+    edge_up = build_hierarchy_edges(code2idx, direction="child_to_parent").to(device)
+    edge_down = build_hierarchy_edges(code2idx, direction="parent_to_child").to(device)
+    weight_up = torch.ones(edge_up.size(1), device=device, dtype=torch.float)
+    weight_down = torch.ones(edge_down.size(1), device=device, dtype=torch.float)
+    return {
+        "up": (edge_up, weight_up),
+        "down": (edge_down, weight_down),
+    }
+
 
 

@@ -310,6 +310,27 @@ class JaccardWeightedSupConLoss(nn.Module):
 
         return loss_text_label, loss_text_text
 
+# 新增: 基于相似度的 Hard Negative Miner
+class HardNegativeMiner:
+    """根据相似度选取困难负样本 (top-K hardest negatives)。"""
+    @staticmethod
+    def mine_hard_negatives(
+        per_label_text_feat: torch.Tensor,  # (B, C, H)
+        label_proto: torch.Tensor,          # (C, H)
+        targets: torch.Tensor,             # (B, C)
+        k: int
+    ) -> torch.Tensor:
+        """返回每个 anchor 的 K 个最难负样本索引 (B, C, K)。"""
+        # 相似度矩阵 (无需除温度, 排序只看大小)
+        sim_matrix = torch.matmul(per_label_text_feat, label_proto.t())  # (B, C, C)
+        # 负样本掩码
+        neg_mask = (~targets.bool()).unsqueeze(1).expand_as(sim_matrix)  # (B, C, C)
+        masked_sim = sim_matrix.masked_fill(~neg_mask, float('-inf'))
+        K = min(k, sim_matrix.size(-1) - 1)
+        # 取每行 top-K hardest negatives
+        _, neg_indices = torch.topk(masked_sim, k=K, dim=-1)
+        return neg_indices
+
 class LabelWiseContrastiveLoss(nn.Module):
     """
     标签感知的对比学习损失 (Label-Wise Contrastive Loss)
@@ -317,11 +338,19 @@ class LabelWiseContrastiveLoss(nn.Module):
     对于每一个正标签，将其对应的文本表征作为"锚点"，
     其自身的标签原型作为"正样本"，而该样本的所有"负标签"对应的原型作为"负样本"。
     """
-    def __init__(self, temperature: float = 0.1, eps: float = 1e-12, neg_samples: int = None):
+    def __init__(self, temperature: float = 0.1, eps: float = 1e-12,
+                 neg_samples: int = None,
+                 mining_strategy: str = "similarity",  # 可选: similarity / gradient / margin / random(all)
+                 margin: float = 0.1):              # margin hard mining 阈值
         super().__init__()
         self.tau = temperature
         self.eps = eps
         self.neg_samples = neg_samples
+        self.mining_strategy = mining_strategy
+        self.margin = margin
+        # 若选择相似度挖掘, 初始化 miner
+        if self.mining_strategy == "similarity":
+            self.miner = HardNegativeMiner()
 
     def forward(self, 
                 per_label_text_feat: torch.Tensor,  # (B, C, H)
@@ -354,7 +383,35 @@ class LabelWiseContrastiveLoss(nn.Module):
 
         # 2. 提取负样本相似度
         neg_mask = ~pos_mask  # (B, C)
-        if self.neg_samples is not None and self.neg_samples > 0:
+        if self.mining_strategy == "similarity":
+            # 30% 最难负样本 + 70% 随机负样本
+            K = self.neg_samples or (sim_matrix.size(-1) - 1)
+            K_hard = int(K * 0.3)
+            K_rand = K - K_hard
+            # 最难负样本
+            hard_idx = self.miner.mine_hard_negatives(
+                per_label_text_feat, label_proto, targets, K_hard
+            )  # (B, C, K_hard)
+            # 随机负样本
+            B, C, _ = sim_matrix.size()
+            rand_idx = []
+            for b in range(B):
+                neg_b = torch.where(~pos_mask[b])[0]
+                if neg_b.size(0) >= K_rand:
+                    perm = neg_b[torch.randperm(neg_b.size(0), device=neg_b.device)][:K_rand]
+                else:
+                    perm = neg_b[torch.randint(0, neg_b.size(0), (K_rand,), device=neg_b.device)]
+                rand_idx.append(perm.unsqueeze(0).repeat(C, 1))
+            rand_idx = torch.stack(rand_idx)  # (B, C, K_rand)
+            # 合并并聚合相似度
+            neg_indices = torch.cat([hard_idx, rand_idx], dim=-1)               # (B, C, K)
+            neg_sim_matrix = torch.gather(sim_matrix, 2, neg_indices)           # (B, C, K)
+        elif self.mining_strategy == "gradient":
+            neg_sim_matrix = self._gradient_based_mining(sim_matrix, pos_mask)
+        elif self.mining_strategy == "margin":
+            neg_sim_matrix = self._margin_based_mining(sim_matrix, pos_sim, pos_mask)
+        elif self.neg_samples is not None and self.neg_samples > 0:
+            # 随机采样负样本 (保持原逻辑)
             B, C, _ = sim_matrix.size()
             K = min(self.neg_samples, C - 1)
             neg_indices = []
@@ -364,15 +421,14 @@ class LabelWiseContrastiveLoss(nn.Module):
                 chosen = perm[:K]
                 neg_indices.append(chosen.unsqueeze(0).repeat(C, 1))
             neg_indices = torch.stack(neg_indices, dim=0)  # (B, C, K)
-            # 采样后的负相似度
             neg_sim_matrix = torch.gather(sim_matrix, 2, neg_indices)
         else:
-            # 原先逻辑: 保留所有负样本
+            # 全量负样本
             neg_sim_matrix = sim_matrix.masked_fill(
-                neg_mask.unsqueeze(1).unsqueeze(-1).expand_as(sim_matrix),
+                neg_mask.unsqueeze(1).expand_as(sim_matrix),
                 float('-inf')
             )
-        
+
         # 3. 计算 InfoNCE loss
         log_sum_exp_neg = torch.logsumexp(neg_sim_matrix, dim=-1) # (B, C)
         
@@ -391,6 +447,34 @@ class LabelWiseContrastiveLoss(nn.Module):
         loss = loss.sum(dim=1) / pos_count
         
         return loss.mean()
+
+    # ----------------- hard mining helpers -----------------
+    def _gradient_based_mining(self, sim_matrix: torch.Tensor, pos_mask: torch.Tensor) -> torch.Tensor:
+        """基于梯度大小(近似)的 hard negative mining。"""
+        neg_mask = ~pos_mask  # (B, C)
+        neg_mask_expand = neg_mask.unsqueeze(1).expand_as(sim_matrix)  # (B, C, C)
+        masked_sim = sim_matrix.masked_fill(~neg_mask_expand, float('-inf'))
+        # 使用 exp(sim) 作为梯度近似
+        grad_score = torch.exp(masked_sim)
+        K = min(self.neg_samples or (sim_matrix.size(-1) - 1), sim_matrix.size(-1) - 1)
+        _, neg_indices = torch.topk(grad_score, k=K, dim=-1)
+        neg_sim_matrix = torch.gather(sim_matrix, 2, neg_indices)
+        return neg_sim_matrix
+
+    def _margin_based_mining(self, sim_matrix: torch.Tensor, pos_sim: torch.Tensor,
+                              pos_mask: torch.Tensor) -> torch.Tensor:
+        """基于 margin 的 hard negative mining。"""
+        B, C, _ = sim_matrix.size()
+        neg_mask = ~pos_mask  # (B, C)
+        pos_sim_expand = pos_sim.unsqueeze(-1).expand(-1, -1, C)  # (B, C, C)
+        # 选择满足 pos_sim - neg_sim < margin 的负样本
+        hard_mask = (sim_matrix > (pos_sim_expand - self.margin)) & \
+                    neg_mask.unsqueeze(1).expand(-1, C, -1)
+        masked_sim = sim_matrix.masked_fill(~hard_mask, float('-inf'))
+        K = min(self.neg_samples or (C - 1), C - 1)
+        _, neg_indices = torch.topk(masked_sim, k=K, dim=-1)
+        neg_sim_matrix = torch.gather(sim_matrix, 2, neg_indices)
+        return neg_sim_matrix
 class LabelGNN(nn.Module):
     """
     用于增强标签原型的 GCN 模块。

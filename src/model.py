@@ -63,7 +63,7 @@ class ClinicalLongformerLabelAttention(nn.Module):
 
 
         # 标签感知注意力
-        self.attention = LabelAttentionV2(
+        self.attention = LabelAttention(
             attention_head=term_counts,
             rep_droupout_num=0.1,
             head_pooling="max",
@@ -100,19 +100,19 @@ class ClinicalLongformerLabelAttention(nn.Module):
             # 直接用更新后的嵌入做注意力
             label_embs_for_attention = updated_embs  # (C*k, H)
 
-            # 对比学习时，取每个标签的 k 个同义词平均作为原型
+            # 对比学习时，取每个标签的 k 个同义词进行 max pooling
             label_proto_for_contrastive = updated_embs.view(
                 self.num_labels, self.term_counts, -1
-            ).mean(dim=1)  # (C, H)
+            ).max(dim=1)[0]  # (C, H)
             
         else:
             # 如果不使用GNN，直接使用原始嵌入
             label_embs_for_attention = raw_embs  # (C*k, H)
             
-            # 对比学习的标签原型：将每个标签的k个同义词取平均
+            # 对比学习时，取每个标签的 k 个同义词进行 max pooling
             label_proto_for_contrastive = raw_embs.view(
                 self.num_labels, self.term_counts, -1
-            ).mean(dim=1)  # (C, H)
+            ).max(dim=1)[0]  # (C, H)
 
         return label_embs_for_attention, label_proto_for_contrastive
     

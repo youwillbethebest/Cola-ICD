@@ -22,6 +22,7 @@ from src.trainer import Trainer
 import wandb
 from datetime import datetime
 from src.module import JaccardWeightedSupConLoss, LabelWiseContrastiveLoss
+from src.loss import FocalLossWithLogits
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -42,6 +43,7 @@ def parse_args():
     parser.add_argument("--val_file",default="data/mimiciv_icd9_val.feather", type=str, help="Path to validation data (.feather)")
     parser.add_argument("--test_file",default="data/mimiciv_icd9_test.feather", type=str, help="Path to test data (.feather)")  
     parser.add_argument("--codes_file", type=str, default="data/filtered_icd_codes_with_desc.feather", help="Path to ICD codes and descriptions file")
+    parser.add_argument("--synonyms_file", type=str, default="data/icd_synonyms.json", help="Path to ICD synonyms file")
     parser.add_argument("--pretrained_model_name", type=str, default="Clinical-Longformer", help="Pretrained model for text encoding")
     parser.add_argument("--label_model_name", type=str, default="Bio_ClinicalBERT", help="Pretrained model for label encoding")
     parser.add_argument("--max_length", type=int, default=4096, help="Max sequence length for text")
@@ -92,7 +94,11 @@ def parse_args():
                         help="是否在邻接矩阵中添加自环")
     parser.add_argument("--adj_matrix_device", type=str, default="cpu",
                         help="构建邻接矩阵时使用的设备")
-
+    
+    parser.add_argument("--use_focal_loss", action="store_true", default=False,
+                        help="是否使用Focal Loss")
+    parser.add_argument("--gamma", type=float, default=2.0, help="Focal Loss 的 gamma 参数")
+    parser.add_argument("--alpha", type=float, default=0.25, help="Focal Loss 的 alpha 参数")
     return parser.parse_args()
 
 def build_scheduler(
@@ -148,7 +154,7 @@ def main_worker(rank, args):
     print("Loading text tokenizer...")
     text_loader = TextLoader(pretrained_model_name=args.pretrained_model_name, max_length=args.max_length)
     print("Loading label tokenizer and model...")
-    label_loader = SynonymLabelLoader(codes_file=args.codes_file, pretrained_model_name=args.label_model_name, max_length=args.label_max_length,term_count=args.term_count)
+    label_loader = SynonymLabelLoader(codes_file=args.codes_file, synonyms_file=args.synonyms_file, pretrained_model_name=args.label_model_name, max_length=args.label_max_length,term_count=args.term_count,sort_method='max')
     print(f"Number of labels: {label_loader.num_labels}")
 
     print("Creating training dataset...")
@@ -239,12 +245,12 @@ def main_worker(rank, args):
         total_steps,
     )
 
-    criterion = nn.BCEWithLogitsLoss()
+    criterion = FocalLossWithLogits(gamma=args.gamma, alpha=args.alpha) if args.use_focal_loss else nn.BCEWithLogitsLoss()
     if args.use_contrastive:
         print("Contrastive learning enabled (Label-Wise).")
         contrastive_criterion = LabelWiseContrastiveLoss(
             temperature=args.contrastive_temperature,
-            neg_samples=100
+            neg_samples=50
         )
     else:
         print("Contrastive learning disabled.")
