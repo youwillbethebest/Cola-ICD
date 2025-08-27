@@ -508,8 +508,8 @@ class HierLabelGNN(nn.Module):
         super().__init__()
         self.up_conv1 = GCNConv(in_dim, hid_dim)
         self.down_conv1 = GCNConv(in_dim, hid_dim)
-        self.up_conv2 = GCNConv(hid_dim, out_dim)
-        self.down_conv2 = GCNConv(hid_dim, out_dim)
+        self.up_conv2 = GCNConv(out_dim, out_dim)
+        self.down_conv2 = GCNConv(out_dim, out_dim)
         # 第一层卷积输出维度为 hid_dim，需要投影到 out_dim
         self.W_up1 = nn.Linear(hid_dim, out_dim)
         self.W_down1 = nn.Linear(hid_dim, out_dim)
