@@ -497,3 +497,41 @@ class LabelGNN(nn.Module):
         # 第二层 GCN 输出增强后的原型
         x = self.conv2(x, edge_index, edge_weight)
         return x
+
+class HierLabelGNN(nn.Module):
+    """
+    分别沿上下行邻接进行卷积，并以门控融合，残差+LayerNorm 稳定训练。
+    E' = LN(E0 + σ(Wg E0) ⊙ (W↑ Conv↑(E0) + W↓ Conv↓(E0)))
+    堆叠两层 block。
+    """
+    def __init__(self, in_dim: int, hid_dim: int, out_dim: int, dropout: float = 0.1):
+        super().__init__()
+        self.up_conv1 = GCNConv(in_dim, hid_dim)
+        self.down_conv1 = GCNConv(in_dim, hid_dim)
+        self.up_conv2 = GCNConv(hid_dim, out_dim)
+        self.down_conv2 = GCNConv(hid_dim, out_dim)
+        self.W_up = nn.Linear(out_dim, out_dim)
+        self.W_down = nn.Linear(out_dim, out_dim)
+        self.Wg1 = nn.Linear(in_dim, out_dim)
+        self.Wg2 = nn.Linear(out_dim, out_dim)
+        self.ln1 = nn.LayerNorm(out_dim)
+        self.ln2 = nn.LayerNorm(out_dim)
+        self.dropout = dropout
+
+    def _block(self, x, up_edge_index, up_edge_weight, down_edge_index, down_edge_weight,
+               up_conv, down_conv, Wg, ln, proj_up, proj_down):
+        h_up = up_conv(x, up_edge_index, up_edge_weight)
+        h_down = down_conv(x, down_edge_index, down_edge_weight)
+        m = torch.sigmoid(Wg(x)) * (proj_up(h_up) + proj_down(h_down))
+        x = ln(x + m)
+        x = F.dropout(x, p=self.dropout, training=self.training)
+        return x
+
+    def forward(self, x: torch.Tensor,
+                up_edge_index: torch.LongTensor, up_edge_weight: torch.FloatTensor,
+                down_edge_index: torch.LongTensor, down_edge_weight: torch.FloatTensor) -> torch.Tensor:
+        x = self._block(x, up_edge_index, up_edge_weight, down_edge_index, down_edge_weight,
+                        self.up_conv1, self.down_conv1, self.Wg1, self.ln1, self.W_up, self.W_down)
+        x = self._block(x, up_edge_index, up_edge_weight, down_edge_index, down_edge_weight,
+                        self.up_conv2, self.down_conv2, self.Wg2, self.ln2, self.W_up, self.W_down)
+        return x

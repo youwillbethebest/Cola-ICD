@@ -43,6 +43,9 @@ class Trainer:
         early_stopping: bool = False,
         early_stopping_patience: int = 3,
         early_stopping_min_delta: float = 0.001,
+        hierarchy_criterion: nn.Module = None,
+        hierarchy_edges: torch.LongTensor = None,
+        hierarchy_loss_weight: float = 0.0,
     ):
         self.model = model
         self.train_loader = train_loader
@@ -85,6 +88,11 @@ class Trainer:
             self.scaler = GradScaler("cuda")
         else:
             self.scaler = None
+
+        # 层级一致性损失
+        self.hierarchy_criterion = hierarchy_criterion
+        self.hierarchy_edges = hierarchy_edges  # CPU/任意设备；前向时迁移
+        self.hierarchy_loss_weight = hierarchy_loss_weight
 
     def load_checkpoint(self, checkpoint_path: str):
         """
@@ -310,6 +318,13 @@ class Trainer:
                         wandb.log({"train/contrastive_loss": self.loss_cl.item()})
                 else:
                     loss = classification_loss
+                # 层级一致性损失（在 logits 上，sigmoid 前）
+                if self.hierarchy_criterion is not None and self.hierarchy_edges is not None and self.hierarchy_loss_weight > 0:
+                    hier_edges = self.hierarchy_edges.to(self.device)
+                    self.loss_hier = self.hierarchy_criterion(logits, hier_edges)
+                    loss = loss + self.hierarchy_loss_weight * self.loss_hier
+                    if self.rank == 0 and self.use_wandb:
+                        wandb.log({"train/hierarchy_loss": self.loss_hier.item()})
         else:
             logits, per_label_text_feat, label_proto = self.model(input_ids=input_ids, attention_mask=attention_mask)
             classification_loss = self.criterion(logits, y_true)  
@@ -320,6 +335,12 @@ class Trainer:
                         wandb.log({"train/contrastive_loss": self.loss_cl.item()})
             else:
                     loss = classification_loss
+            if self.hierarchy_criterion is not None and self.hierarchy_edges is not None and self.hierarchy_loss_weight > 0:
+                    hier_edges = self.hierarchy_edges.to(self.device)
+                    self.loss_hier = self.hierarchy_criterion(logits, hier_edges)
+                    loss = loss + self.hierarchy_loss_weight * self.loss_hier
+                    if self.rank == 0 and self.use_wandb:
+                        wandb.log({"train/hierarchy_loss": self.loss_hier.item()})
         logits = torch.sigmoid(logits) 
         return {'loss': loss, 'logits': logits, 'targets': y_true}
 

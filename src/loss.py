@@ -50,3 +50,33 @@ class FocalLossWithLogits(nn.Module):
             return loss
 
 
+
+class HierarchyConsistencyLoss(nn.Module):
+    """
+    有向 parent→child 的层级一致性约束：
+      L = mean(ReLU(margin + s_child - s_parent))
+    默认在 logits 空间计算（更稳）。
+    """
+    def __init__(self, margin: float = 0.0, reduction: str = "mean"):
+        super().__init__()
+        self.margin = margin
+        self.reduction = reduction
+
+    def forward(self, logits: torch.Tensor, edges_pc: torch.LongTensor, weight: torch.Tensor = None) -> torch.Tensor:
+        # logits: (B, C); edges_pc: (2, E) with parent->child
+        if edges_pc is None or edges_pc.numel() == 0:
+            return torch.tensor(0., device=logits.device)
+        parent_idx = edges_pc[0]
+        child_idx = edges_pc[1]
+        s_parent = logits[:, parent_idx]  # (B, E)
+        s_child = logits[:, child_idx]    # (B, E)
+        viol = torch.relu(self.margin + s_child - s_parent)  # (B, E)
+        if weight is not None:
+            viol = viol * weight  # broadcast (E,) or (B,E)
+        if self.reduction == "mean":
+            return viol.mean()
+        elif self.reduction == "sum":
+            return viol.sum()
+        else:
+            return viol  # (B, E)
+

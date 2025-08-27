@@ -22,7 +22,8 @@ from src.trainer import Trainer
 import wandb
 from datetime import datetime
 from src.module import JaccardWeightedSupConLoss, LabelWiseContrastiveLoss
-from src.loss import FocalLossWithLogits
+from src.loss import FocalLossWithLogits, HierarchyConsistencyLoss
+from src.data_loader import build_hierarchy_adjs, build_hierarchy_edges
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -82,18 +83,26 @@ def parse_args():
     parser.add_argument("--contrastive_temperature", type=float, default=0.1,
                         help="对比学习的温度 τ (for LabelWiseContrastiveLoss)")
 
-    # ---- GNN和共现矩阵相关参数 ----
+    # ---- GNN和共现/层级图相关参数 ----
     parser.add_argument("--use_gnn", action="store_true", default=False,
                         help="是否启用GNN更新标签嵌入")
     parser.add_argument("--adj_matrix_mode", type=str, default="ppmi", 
-                        choices=["binary", "count", "ppmi"],
+                        choices=["binary", "count", "ppmi", "hierarchy"],
                         help="邻接矩阵构建模式")
     parser.add_argument("--adj_matrix_topk", type=int, default=20,
-                        help="邻接矩阵每行保留的边数 topk")
+                        help="邻接矩阵每行保留的边数 topk（仅共现图生效）")
     parser.add_argument("--adj_matrix_self_loop", action="store_true", default=True,
-                        help="是否在邻接矩阵中添加自环")
+                        help="是否在邻接矩阵中添加自环（仅共现图生效）")
     parser.add_argument("--adj_matrix_device", type=str, default="cpu",
                         help="构建邻接矩阵时使用的设备")
+    
+    # ---- 层级一致性损失 ----
+    parser.add_argument("--use_hierarchy_loss", action="store_true", default=False,
+                        help="是否启用层级一致性损失（parent→child）")
+    parser.add_argument("--hierarchy_loss_weight", type=float, default=0.05,
+                        help="层级一致性损失权重")
+    parser.add_argument("--hierarchy_margin", type=float, default=0.0,
+                        help="层级一致性 hinge margin")
     
     parser.add_argument("--use_focal_loss", action="store_true", default=False,
                         help="是否使用Focal Loss")
@@ -202,20 +211,34 @@ def main_worker(rank, args):
     
     # 构建邻接矩阵（如果启用GNN）
     adj_matrix = None
+    hierarchy_edges = None
     if args.use_gnn:
         print("Building adjacency matrix for GNN...")
-        from src.data_loader import build_adj_matrix
-        edge_index, edge_weight = build_adj_matrix(
-            dataset=train_dataset,
-            num_labels=label_loader.num_labels,
-            term_count=args.term_count,
-            mode=args.adj_matrix_mode,
-            add_self_loop=args.adj_matrix_self_loop,
-            topk=args.adj_matrix_topk,
-            device=args.adj_matrix_device
-        )
-        adj_matrix = (edge_index, edge_weight)
-        print(f"Adjacency matrix shape: {edge_index.shape}, {edge_weight.shape}")
+        if args.adj_matrix_mode == "hierarchy":
+            # 层级图：双向邻接用于消息传递；不复制同义词节点
+            adj_matrix = build_hierarchy_adjs(
+                code2idx=label_loader.code2idx,
+                device=args.adj_matrix_device
+            )
+            # 有向 parent→child 边：用于层级一致性损失
+            hierarchy_edges = build_hierarchy_edges(
+                code2idx=label_loader.code2idx,
+                direction="parent_to_child"
+            )
+            print("Hierarchy adjacency built (up/down).")
+        else:
+            from src.data_loader import build_adj_matrix
+            edge_index, edge_weight = build_adj_matrix(
+                dataset=train_dataset,
+                num_labels=label_loader.num_labels,
+                term_count=args.term_count,
+                mode=args.adj_matrix_mode,
+                add_self_loop=args.adj_matrix_self_loop,
+                topk=args.adj_matrix_topk,
+                device=args.adj_matrix_device
+            )
+            adj_matrix = (edge_index, edge_weight)
+            print(f"Adjacency matrix shape: {edge_index.shape}, {edge_weight.shape}")
     
     model = ClinicalLongformerLabelAttention(
         longformer_path=args.pretrained_model_name,
@@ -255,6 +278,9 @@ def main_worker(rank, args):
     else:
         print("Contrastive learning disabled.")
         contrastive_criterion = None
+    hierarchy_criterion = None
+    if args.use_hierarchy_loss and args.adj_matrix_mode == "hierarchy":
+        hierarchy_criterion = HierarchyConsistencyLoss(margin=args.hierarchy_margin)
     print("Initializing metrics...")
     
     # ---------- 生成要评估的 code_indices ----------
@@ -339,7 +365,9 @@ def main_worker(rank, args):
         early_stopping=args.early_stopping,
         early_stopping_patience=args.early_stopping_patience,
         early_stopping_min_delta=args.early_stopping_min_delta,
-
+        hierarchy_criterion=hierarchy_criterion,
+        hierarchy_edges=hierarchy_edges,
+        hierarchy_loss_weight=args.hierarchy_loss_weight,
     )
     print("Training started")
     trainer.train()

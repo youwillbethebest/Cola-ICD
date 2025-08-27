@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from typing import Optional
 from transformers import AutoModel
-from src.module import LabelAttention, GraphAttentionLayer, LabelGNN, LabelAttentionV2
+from src.module import LabelAttention, GraphAttentionLayer, LabelGNN, LabelAttentionV2, HierLabelGNN
 from src.data_loader import SynonymLabelLoader
 
 
@@ -45,17 +45,26 @@ class ClinicalLongformerLabelAttention(nn.Module):
         self.term_counts = term_counts  # 保存 term_counts
         # ---------------- GNN 模块 (可选) ----------------
         self.use_gnn = use_gnn
+        self.hier_mode = False
         if self.use_gnn:
             assert adj_matrix is not None, "当 use_gnn=True 时，必须提供 adj_matrix。"
-            # 兼容两种格式：密集矩阵 Tensor 或稀疏表示 (edge_index, edge_weight)
-
-                # 新接口：直接传入 (edge_index, edge_weight)
-            edge_index, edge_weight = adj_matrix
-            # 注册为 buffer
-            self.register_buffer("edge_index", edge_index)
-            self.register_buffer("edge_weight", edge_weight)
-            # GNN 模块内部已是两层 GCNConv
-            self.gnn = LabelGNN(hidden_size, hidden_size // 2, hidden_size)
+            # 支持两类：共现图 (edge_index, edge_weight) 或 层级图 {'up':(...), 'down':(...)}
+            if isinstance(adj_matrix, dict) and "up" in adj_matrix and "down" in adj_matrix:
+                self.hier_mode = True
+                up_ei, up_w = adj_matrix["up"]
+                down_ei, down_w = adj_matrix["down"]
+                self.register_buffer("up_edge_index", up_ei)
+                self.register_buffer("up_edge_weight", up_w)
+                self.register_buffer("down_edge_index", down_ei)
+                self.register_buffer("down_edge_weight", down_w)
+                self.gnn_hier = HierLabelGNN(hidden_size, hidden_size // 2, hidden_size)
+            else:
+                edge_index, edge_weight = adj_matrix
+                # 注册为 buffer
+                self.register_buffer("edge_index", edge_index)
+                self.register_buffer("edge_weight", edge_weight)
+                # GNN 模块内部已是两层 GCNConv
+                self.gnn = LabelGNN(hidden_size, hidden_size // 2, hidden_size)
             
             # 可以堆叠多层GAT
             # 或者只用一层
@@ -94,16 +103,23 @@ class ClinicalLongformerLabelAttention(nn.Module):
         raw_embs = self.label_embs  # (C*k, H)
         
         if self.use_gnn:
-            # 调用 GNN 时传入稀疏表示
-            updated_embs = self.gnn(raw_embs, self.edge_index, self.edge_weight)  # (C*k, H)
-
-            # 直接用更新后的嵌入做注意力
-            label_embs_for_attention = updated_embs  # (C*k, H)
-
-            # 对比学习时，取每个标签的 k 个同义词进行 max pooling
-            label_proto_for_contrastive = updated_embs.view(
-                self.num_labels, self.term_counts, -1
-            ).max(dim=1)[0]  # (C, H)
+            if self.hier_mode:
+                # 代码级图：先聚合术语为代码级，再图更新，再广播回术语位
+                code_pool = raw_embs.view(self.num_labels, self.term_counts, -1).max(dim=1)[0]  # (C, H)
+                code_updated = self.gnn_hier(
+                    code_pool,
+                    self.up_edge_index, self.up_edge_weight,
+                    self.down_edge_index, self.down_edge_weight
+                )  # (C, H)
+                label_embs_for_attention = code_updated.repeat_interleave(self.term_counts, dim=0)  # (C*k, H)
+                label_proto_for_contrastive = code_updated  # (C, H)
+            else:
+                # 调用 GNN 时传入稀疏表示（共现图）
+                updated_embs = self.gnn(raw_embs, self.edge_index, self.edge_weight)  # (C*k, H)
+                label_embs_for_attention = updated_embs  # (C*k, H)
+                label_proto_for_contrastive = updated_embs.view(
+                    self.num_labels, self.term_counts, -1
+                ).max(dim=1)[0]  # (C, H)
             
         else:
             # 如果不使用GNN，直接使用原始嵌入
