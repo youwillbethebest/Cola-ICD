@@ -510,8 +510,12 @@ class HierLabelGNN(nn.Module):
         self.down_conv1 = GCNConv(in_dim, hid_dim)
         self.up_conv2 = GCNConv(hid_dim, out_dim)
         self.down_conv2 = GCNConv(hid_dim, out_dim)
-        self.W_up = nn.Linear(out_dim, out_dim)
-        self.W_down = nn.Linear(out_dim, out_dim)
+        # 第一层卷积输出维度为 hid_dim，需要投影到 out_dim
+        self.W_up1 = nn.Linear(hid_dim, out_dim)
+        self.W_down1 = nn.Linear(hid_dim, out_dim)
+        # 第二层卷积输出维度为 out_dim，保持 out_dim
+        self.W_up2 = nn.Linear(out_dim, out_dim)
+        self.W_down2 = nn.Linear(out_dim, out_dim)
         self.Wg1 = nn.Linear(in_dim, out_dim)
         self.Wg2 = nn.Linear(out_dim, out_dim)
         self.ln1 = nn.LayerNorm(out_dim)
@@ -530,8 +534,10 @@ class HierLabelGNN(nn.Module):
     def forward(self, x: torch.Tensor,
                 up_edge_index: torch.LongTensor, up_edge_weight: torch.FloatTensor,
                 down_edge_index: torch.LongTensor, down_edge_weight: torch.FloatTensor) -> torch.Tensor:
+        # 第一层：hid_dim → out_dim
         x = self._block(x, up_edge_index, up_edge_weight, down_edge_index, down_edge_weight,
-                        self.up_conv1, self.down_conv1, self.Wg1, self.ln1, self.W_up, self.W_down)
+                        self.up_conv1, self.down_conv1, self.Wg1, self.ln1, self.W_up1, self.W_down1)
+        # 第二层：out_dim → out_dim
         x = self._block(x, up_edge_index, up_edge_weight, down_edge_index, down_edge_weight,
-                        self.up_conv2, self.down_conv2, self.Wg2, self.ln2, self.W_up, self.W_down)
+                        self.up_conv2, self.down_conv2, self.Wg2, self.ln2, self.W_up2, self.W_down2)
         return x
