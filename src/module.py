@@ -310,6 +310,65 @@ class JaccardWeightedSupConLoss(nn.Module):
 
         return loss_text_label, loss_text_text
 
+
+class PositiveOnlyContrastiveLoss(nn.Module):
+    """
+    无负样本对比学习（Positive-Only）：
+    - 仅对正对儿(anchor 与其对应标签原型)最大化相似度
+    - 使用 logistic 正对儿损失: -log(sigmoid(sim/τ))
+    - 不引入任何显式负样本
+    """
+    def __init__(self, temperature: float = 0.07, reduction: str = "mean"):
+        super().__init__()
+        self.tau = temperature
+        self.reduction = reduction
+
+    def forward(
+        self,
+        per_label_text_feat: torch.Tensor,  # (B, C, H)
+        label_proto: torch.Tensor,          # (C, H)
+        targets: torch.Tensor               # (B, C) multi-hot
+    ) -> torch.Tensor:
+        # 归一化
+        text_feat = F.normalize(per_label_text_feat, dim=-1)   # (B, C, H)
+        proto_feat = F.normalize(label_proto, dim=-1)          # (C, H)
+
+        # 针对每个标签 i，只取对应的原型 proto[i] 与 text_feat[:, i]
+        proto_expanded = proto_feat.unsqueeze(0)               # (1, C, H)
+        sim = (text_feat * proto_expanded).sum(dim=-1)         # (B, C)
+        sim = sim / self.tau
+
+        pos_mask = targets.bool()
+        if not pos_mask.any():
+            return torch.tensor(0., device=per_label_text_feat.device)
+
+        # 数值稳定：-log(sigmoid(sim)) 等价于 -F.logsigmoid(sim)
+        log_sigmoid = F.logsigmoid(sim)                         # (B, C)
+        elem_loss = -log_sigmoid                                 # (B, C)
+
+        if self.reduction == "none":
+            # 返回逐元素损失，仅正位生效
+            full_loss = torch.zeros_like(elem_loss)
+            full_loss[pos_mask] = elem_loss[pos_mask]
+            return full_loss
+
+        # 按样本内正标签数归一化，避免正例多的样本主导梯度
+        pos_mask_f = pos_mask.float()
+        per_sample_sum = (elem_loss * pos_mask_f).sum(dim=1)     # (B,)
+        pos_count = pos_mask_f.sum(dim=1)                        # (B,)
+        valid = pos_count > 0
+        # 防止除零：仅对 valid 样本做平均
+        per_sample_loss = torch.zeros_like(per_sample_sum)
+        per_sample_loss[valid] = per_sample_sum[valid] / pos_count[valid]
+
+        if self.reduction == "mean":
+            return per_sample_loss[valid].mean()
+        elif self.reduction == "sum":
+            return per_sample_loss[valid].sum()
+        else:
+            # 兜底：返回逐样本损失
+            return per_sample_loss
+
 # 新增: 基于相似度的 Hard Negative Miner
 class HardNegativeMiner:
     """根据相似度选取困难负样本 (top-K hardest negatives)。"""

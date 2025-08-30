@@ -21,7 +21,7 @@ from src.metric import MetricCollection, Precision, Recall, F1Score, MeanAverage
 from src.trainer import Trainer
 import wandb
 from datetime import datetime
-from src.module import JaccardWeightedSupConLoss, LabelWiseContrastiveLoss
+from src.module import JaccardWeightedSupConLoss, LabelWiseContrastiveLoss, PositiveOnlyContrastiveLoss
 from src.loss import FocalLossWithLogits, HierarchyConsistencyLoss
 from src.data_loader import build_hierarchy_adjs, build_hierarchy_edges
 
@@ -82,6 +82,8 @@ def parse_args():
                         help="对比学习的损失权重")
     parser.add_argument("--contrastive_temperature", type=float, default=0.1,
                         help="对比学习的温度 τ (for LabelWiseContrastiveLoss)")
+    parser.add_argument("--use_contrastive_positive_only", action="store_true", default=False,
+                        help="是否启用仅正样本对比学习（Positive-Only）")
 
     # ---- GNN和共现/层级图相关参数 ----
     parser.add_argument("--use_gnn", action="store_true", default=False,
@@ -274,6 +276,11 @@ def main_worker(rank, args):
         contrastive_criterion = LabelWiseContrastiveLoss(
             temperature=args.contrastive_temperature,
             neg_samples=50
+        )
+    elif args.use_contrastive_positive_only:
+        print("Contrastive learning enabled (Positive-Only).")
+        contrastive_criterion = PositiveOnlyContrastiveLoss(
+            temperature=args.contrastive_temperature
         )
     else:
         print("Contrastive learning disabled.")
