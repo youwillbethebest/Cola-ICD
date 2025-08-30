@@ -482,9 +482,9 @@ class LabelWiseContrastiveLoss(nn.Module):
             neg_indices = torch.stack(neg_indices, dim=0)  # (B, C, K)
             neg_sim_matrix = torch.gather(sim_matrix, 2, neg_indices)
         else:
-            # 全量负样本
+            # 全量负样本：抹掉正样本，仅保留负样本
             neg_sim_matrix = sim_matrix.masked_fill(
-                neg_mask.unsqueeze(1).expand_as(sim_matrix),
+                pos_mask.unsqueeze(1).expand_as(sim_matrix),
                 float('-inf')
             )
 
