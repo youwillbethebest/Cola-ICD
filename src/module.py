@@ -314,60 +314,55 @@ class JaccardWeightedSupConLoss(nn.Module):
 class PositiveOnlyContrastiveLoss(nn.Module):
     """
     无负样本对比学习（Positive-Only）：
-    - 仅对正对儿(anchor 与其对应标签原型)最大化相似度
-    - 使用 logistic 正对儿损失: -log(sigmoid(sim/τ))
-    - 不引入任何显式负样本
+    仅对正对儿 (b,i) ↔ proto[i] 最大化相似度，-log σ(sim/τ)
     """
-    def __init__(self, temperature: float = 0.07, reduction: str = "mean"):
+    def __init__(self, temperature: float = 0.07, reduction: str = "mean",
+                 eps: float = 1e-12, margin: float = 0.0):
         super().__init__()
         self.tau = temperature
         self.reduction = reduction
+        self.eps = eps
+        self.margin = margin
 
-    def forward(
-        self,
-        per_label_text_feat: torch.Tensor,  # (B, C, H)
-        label_proto: torch.Tensor,          # (C, H)
-        targets: torch.Tensor               # (B, C) multi-hot
-    ) -> torch.Tensor:
-        # 归一化
-        text_feat = F.normalize(per_label_text_feat, dim=-1)   # (B, C, H)
-        proto_feat = F.normalize(label_proto, dim=-1)          # (C, H)
+    def forward(self,
+                per_label_text_feat: torch.Tensor,  # (B, C, H)
+                label_proto: torch.Tensor,          # (C, H)
+                targets: torch.Tensor               # (B, C) multi-hot
+               ) -> torch.Tensor:
 
-        # 针对每个标签 i，只取对应的原型 proto[i] 与 text_feat[:, i]
-        proto_expanded = proto_feat.unsqueeze(0)               # (1, C, H)
-        sim = (text_feat * proto_expanded).sum(dim=-1)         # (B, C)
-        sim = sim / self.tau
+        # 归一化（显式 eps）
+        text_feat  = F.normalize(per_label_text_feat, dim=-1, eps=self.eps)  # (B,C,H)
+        proto_feat = F.normalize(label_proto,          dim=-1, eps=self.eps) # (C,H)
+
+        # 同标签相似度 s_ii
+        sim = torch.einsum("bch,ch->bc", text_feat, proto_feat)             # (B,C)
+        sim = sim / max(self.tau, 1e-6)
 
         pos_mask = targets.bool()
-        if not pos_mask.any():
-            return torch.tensor(0., device=per_label_text_feat.device)
+        if not pos_mask.any().item():
+            return sim.new_zeros(())
 
-        # 数值稳定：-log(sigmoid(sim)) 等价于 -F.logsigmoid(sim)
-        log_sigmoid = F.logsigmoid(sim)                         # (B, C)
-        elem_loss = -log_sigmoid                                 # (B, C)
+        # 正对儿 logistic；可选 margin：softplus(m - sim) 更“判别”
+        if self.margin > 0.0:
+            elem_loss = F.softplus(self.margin - sim)                        # (B,C)
+        else:
+            elem_loss = -F.logsigmoid(sim)                                   # (B,C)
 
-        if self.reduction == "none":
-            # 返回逐元素损失，仅正位生效
-            full_loss = torch.zeros_like(elem_loss)
-            full_loss[pos_mask] = elem_loss[pos_mask]
-            return full_loss
+        # 仅正位生效
+        loss_mat = elem_loss * pos_mask.float()                              # (B,C)
 
-        # 按样本内正标签数归一化，避免正例多的样本主导梯度
-        pos_mask_f = pos_mask.float()
-        per_sample_sum = (elem_loss * pos_mask_f).sum(dim=1)     # (B,)
-        pos_count = pos_mask_f.sum(dim=1)                        # (B,)
-        valid = pos_count > 0
-        # 防止除零：仅对 valid 样本做平均
-        per_sample_loss = torch.zeros_like(per_sample_sum)
-        per_sample_loss[valid] = per_sample_sum[valid] / pos_count[valid]
+        # 按样本内正标签数归一化
+        pos_count = pos_mask.sum(dim=1).clamp_min(1).float()                 # (B,)
+        per_sample_loss = loss_mat.sum(dim=1) / pos_count                    # (B,)
 
         if self.reduction == "mean":
-            return per_sample_loss[valid].mean()
+            return per_sample_loss.mean()
         elif self.reduction == "sum":
-            return per_sample_loss[valid].sum()
+            return per_sample_loss.sum()
+        elif self.reduction == "none":
+            return loss_mat
         else:
-            # 兜底：返回逐样本损失
-            return per_sample_loss
+            raise ValueError("reduction must be one of ['mean','sum','none']")
 
 # 新增: 基于相似度的 Hard Negative Miner
 class HardNegativeMiner:
