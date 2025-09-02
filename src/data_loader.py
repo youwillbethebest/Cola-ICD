@@ -8,6 +8,7 @@ import torch.nn.functional as F
 import json
 import random
 import re
+import os
 
 # ---------------- 新增：ICD9 层级推断 & 构图 ----------------
 def _infer_parent(code: str, code_set: set[str]) -> str | None:
@@ -297,11 +298,13 @@ class SynonymLabelLoader(LabelLoader):
     - 从 synonyms_file 加载同义词字典（ICD code -> [同义词列表]）
     - 为每个 code 准备 term_count 个术语（第一个是原始描述，后面补充同义词）
     - 支持 'random'/'max'/'mean' 三种同义词排序策略
+    - 支持从缩写文件加载缩写和通用表达，拼接到描述后面
     """
     def __init__(
         self,
         codes_file: str = "data/filtered_icd_codes_with_desc.feather",
         synonyms_file: str = "data/icd_synonyms.json",
+        abbreviations_file: str = None,
         pretrained_model_name: str = "Bio_ClinicalBERT",
         max_length: int = 128,
         term_count: int = 4,
@@ -315,8 +318,16 @@ class SynonymLabelLoader(LabelLoader):
         # 加载同义词表
         with open(synonyms_file, 'r') as f:
             self.icd_syn = json.load(f)
+        
+        # 加载缩写文件（可选）
+        self.icd_abbr = {}
+        if abbreviations_file and os.path.exists(abbreviations_file):
+            with open(abbreviations_file, 'r', encoding='utf-8') as f:
+                self.icd_abbr = json.load(f)
+        
         self.term_count = term_count
         self.sort_method = sort_method
+        self.abbreviations_file = abbreviations_file
 
     def __call__(self) -> torch.Tensor:
         """
@@ -324,8 +335,26 @@ class SynonymLabelLoader(LabelLoader):
         (num_labels * term_count, hidden_size) 的 Tensor。
         """
         terms = []
-        # 对每个 code 构建一个 [原始描述 + 同义词列表]
+        # 对每个 code 构建一个 [增强描述 + 同义词列表]
         for code, desc in zip(self.codes, self.descriptions):
+            # 构建增强描述：原始描述 + 缩写 + 5个通用表达
+            enhanced_desc = desc
+            if code in self.icd_abbr:
+                abbr_data = self.icd_abbr[code]
+                
+                # 添加所有缩写
+                abbreviations = abbr_data.get("abbreviations", [])
+                if abbreviations:
+                    abbr_text = " ".join(abbreviations)
+                    enhanced_desc += f" ({abbr_text})"
+                
+                # 添加前5个通用表达
+                common_expressions = abbr_data.get("common_expressions", [])[:5]
+                if common_expressions:
+                    expr_text = " ".join(common_expressions)
+                    enhanced_desc += f" {expr_text}"
+            
+            # 获取同义词
             syns = self.icd_syn.get(code, [])
             # 排序策略
             if self.sort_method == 'random':
@@ -342,8 +371,8 @@ class SynonymLabelLoader(LabelLoader):
                 if sel:
                     repeat = int((self.term_count - 1) / len(sel)) + 1
                     sel = (sel * repeat)[:self.term_count - 1]
-            # 原始描述总是在第一个
-            terms.extend([desc] + sel)
+            # 增强描述总是在第一个
+            terms.extend([enhanced_desc] + sel)
 
         # 对所有术语一起做 tokenizer
         enc = self.tokenizer(
