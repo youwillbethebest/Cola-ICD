@@ -365,6 +365,7 @@ def main_worker(rank, args):
         best_metric_name=args.best_metric_name,
         use_amp=args.use_amp,
         use_wandb=args.use_wandb and (not args.use_ddp or rank == 0),
+        save_artifacts=False,  # 禁用wandb artifacts保存
         use_ddp=args.use_ddp,
         rank=rank if args.use_ddp else 0,
         world_size=args.world_size if args.use_ddp else 1,

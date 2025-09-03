@@ -170,6 +170,7 @@ def train_single_gpu():
         best_metric_name=best_metric_name,
         use_amp=use_amp,
         use_wandb=use_wandb,
+        save_artifacts=False,  # 禁用wandb artifacts保存
         use_ddp=False,         # 不使用DDP
         rank=0,                # 单GPU时rank固定为0
         world_size=1,          # 单GPU时world_size为1
@@ -309,6 +310,7 @@ def train_ddp_worker(rank, world_size):
         best_metric_name=best_metric_name,
         use_amp=use_amp,
         use_wandb=use_wandb,
+        save_artifacts=False,  # 禁用wandb artifacts保存
         use_ddp=True,          # 启用DDP
         rank=rank,             # 当前进程rank
         world_size=world_size, # 总进程数

@@ -35,6 +35,7 @@ class Trainer:
         best_metric_name: str = "map",
         use_amp: bool = False,
         use_wandb: bool = False,
+        save_artifacts: bool = False,
         use_ddp: bool = False,
         rank: int = 0,
         world_size: int = 1,
@@ -67,6 +68,7 @@ class Trainer:
         self.best_epoch = -1
         self.use_amp = use_amp
         self.use_wandb = use_wandb
+        self.save_artifacts = save_artifacts
         self.use_ddp = use_ddp
         self.rank = rank
         self.world_size = world_size
@@ -258,7 +260,7 @@ class Trainer:
         """
         save_path = os.path.join(self.output_dir, f"final_model.pt")
         self.save_checkpoint(save_path)
-        if self.use_wandb and (not self.use_ddp or self.rank == 0):
+        if self.use_wandb and self.save_artifacts and (not self.use_ddp or self.rank == 0):
             best_path = os.path.join(self.output_dir, f"best_model.pt")
             best_artifact = wandb.Artifact(
                 name="Attentionicd-best-model",      # 在 WandB 上的 artifact 名称
