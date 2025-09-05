@@ -294,11 +294,13 @@ class ICDMultiLabelDataset(Dataset):
 
 class SynonymLabelLoader(LabelLoader):
     """
-    支持同义词的 LabelLoader：
+    支持多类型术语的 LabelLoader：
     - 从 synonyms_file 加载同义词字典（ICD code -> [同义词列表]）
-    - 为每个 code 准备 term_count 个术语（第一个是原始描述，后面补充同义词）
+    - 为每个 code 准备 term_count 个术语
+    - 支持缩写开关 use_abbreviations：
+      * 开启时：第1个术语=原描述，第2个=缩写组合，第3个=通用表达组合，剩余=同义词
+      * 关闭时：第1个术语=原描述，剩余=同义词
     - 支持 'random'/'max'/'mean' 三种同义词排序策略
-    - 支持从缩写文件加载缩写和通用表达，拼接到描述后面
     """
     def __init__(
         self,
@@ -308,7 +310,8 @@ class SynonymLabelLoader(LabelLoader):
         pretrained_model_name: str = "Bio_ClinicalBERT",
         max_length: int = 128,
         term_count: int = 4,
-        sort_method: str = 'random'
+        sort_method: str = 'random',
+        use_abbreviations: bool = False
     ):
         super().__init__(
             codes_file=codes_file,
@@ -328,6 +331,7 @@ class SynonymLabelLoader(LabelLoader):
         self.term_count = term_count
         self.sort_method = sort_method
         self.abbreviations_file = abbreviations_file
+        self.use_abbreviations = use_abbreviations
 
     def __call__(self) -> torch.Tensor:
         """
@@ -335,44 +339,57 @@ class SynonymLabelLoader(LabelLoader):
         (num_labels * term_count, hidden_size) 的 Tensor。
         """
         terms = []
-        # 对每个 code 构建一个 [增强描述 + 同义词列表]
+        # 对每个 code 构建术语列表
         for code, desc in zip(self.codes, self.descriptions):
-            # 构建增强描述：原始描述 + 缩写 + 5个通用表达
-            enhanced_desc = desc
-            if code in self.icd_abbr:
-                abbr_data = self.icd_abbr[code]
-                
-                # 添加所有缩写
-                abbreviations = abbr_data.get("abbreviations", [])
-                if abbreviations:
-                    abbr_text = " ".join(abbreviations)
-                    enhanced_desc += f" ({abbr_text})"
-                
-                # 添加前5个通用表达
-                common_expressions = abbr_data.get("common_expressions", [])[:5]
-                if common_expressions:
-                    expr_text = " ".join(common_expressions)
-                    enhanced_desc += f" {expr_text}"
+            # 构建术语列表
+            code_terms = [desc]  # 原始描述始终在第一位
             
-            # 获取同义词
+            if self.use_abbreviations:
+                # 获取缩写和通用表达（如果存在）
+                abbreviations = []
+                common_expressions = []
+                if code in self.icd_abbr:
+                    abbr_data = self.icd_abbr[code]
+                    abbreviations = abbr_data.get("abbreviations", [])
+                    common_expressions = abbr_data.get("common_expressions", [])
+                
+                # 添加缩写组合作为第二个术语（如果有的话）
+                if abbreviations:
+                    abbr_combined = " ".join(abbreviations)
+                    code_terms.append(abbr_combined)
+                
+                # 添加通用表达组合作为第三个术语（如果有的话）
+                if common_expressions:
+                    expr_combined = " ".join(common_expressions)
+                    code_terms.append(expr_combined)
+            
+            # 获取同义词填充剩余位置
             syns = self.icd_syn.get(code, [])
-            # 排序策略
+            
+            # 对同义词应用排序策略
             if self.sort_method == 'random':
                 random.shuffle(syns)
             elif self.sort_method == 'max':
                 syns = sorted(syns, key=lambda x: len(x), reverse=True)
             elif self.sort_method == 'mean':
                 syns = sorted(syns, key=lambda x: len(x))
-            # 取 term_count-1 个同义词，不足时循环补齐
-            if len(syns) >= self.term_count - 1:
-                sel = syns[:self.term_count - 1]
-            else:
-                sel = syns
-                if sel:
-                    repeat = int((self.term_count - 1) / len(sel)) + 1
-                    sel = (sel * repeat)[:self.term_count - 1]
-            # 增强描述总是在第一个
-            terms.extend([enhanced_desc] + sel)
+            
+            # 用同义词填充剩余的 term_count 位置
+            remaining_slots = self.term_count - len(code_terms)
+            if remaining_slots > 0:
+                if len(syns) >= remaining_slots:
+                    selected_syns = syns[:remaining_slots]
+                elif len(syns) > 0:
+                    # 循环补齐不足的同义词
+                    repeat = int(remaining_slots / len(syns)) + 1
+                    selected_syns = (syns * repeat)[:remaining_slots]
+                else:
+                    # 如果完全没有同义词，用原始描述填充
+                    selected_syns = [desc] * remaining_slots
+                
+                code_terms.extend(selected_syns)
+            
+            terms.extend(code_terms[:self.term_count])
 
         # 对所有术语一起做 tokenizer
         enc = self.tokenizer(
