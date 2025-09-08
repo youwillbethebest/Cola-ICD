@@ -16,7 +16,8 @@ from transformers import (
 )
 from torch.optim import AdamW
 from src.data_loader import TextLoader, LabelLoader, ICDMultiLabelDataset, SynonymLabelLoader
-from src.model import ClinicalLongformerLabelAttention
+# 修改导入：添加新的BERT chunk模型
+from src.model import ClinicalLongformerLabelAttention, ClinicalBERTChunkAttention, ClinicalBERTChunkAttentionV2
 from src.metric import MetricCollection, Precision, Recall, F1Score, MeanAveragePrecision, AUC, Precision_K, LossMetric
 from src.trainer import Trainer
 import wandb
@@ -112,6 +113,17 @@ def parse_args():
                         help="是否使用Focal Loss")
     parser.add_argument("--gamma", type=float, default=2.0, help="Focal Loss 的 gamma 参数")
     parser.add_argument("--alpha", type=float, default=0.25, help="Focal Loss 的 alpha 参数")
+    
+    # ---- 新增：BERT chunk 相关参数 ----
+    parser.add_argument("--model_type", type=str, default="longformer", 
+                        choices=["longformer", "bert_chunk", "bert_chunk_v2"],
+                        help="模型类型选择")
+    parser.add_argument("--chunk_size", type=int, default=512,
+                        help="BERT chunk模型的chunk大小")
+    parser.add_argument("--chunk_aggregation", type=str, default="max",
+                        choices=["mean", "max", "sum", "weighted"],
+                        help="Chunk聚合方式 (仅对bert_chunk_v2有效)")
+    
     return parser.parse_args()
 
 def build_scheduler(
@@ -162,6 +174,7 @@ def main_worker(rank, args):
     device = torch.device(args.device)
     print(f"Use AMP: {args.use_amp}")
     print(f"Using device: {device}")
+    print(f"Model type: {args.model_type}")
 
     # 数据加载和模型初始化
     print("Loading text tokenizer...")
@@ -244,13 +257,39 @@ def main_worker(rank, args):
             adj_matrix = (edge_index, edge_weight)
             print(f"Adjacency matrix shape: {edge_index.shape}, {edge_weight.shape}")
     
-    model = ClinicalLongformerLabelAttention(
-        longformer_path=args.pretrained_model_name,
-        term_counts=args.term_count,
-        label_loader=label_loader,
-        use_gnn=args.use_gnn,
-        adj_matrix=adj_matrix
-    )
+    # 根据模型类型创建不同的模型
+    if args.model_type == "longformer":
+        print("Using ClinicalLongformerLabelAttention model...")
+        model = ClinicalLongformerLabelAttention(
+            longformer_path=args.pretrained_model_name,
+            term_counts=args.term_count,
+            label_loader=label_loader,
+            use_gnn=args.use_gnn,
+            adj_matrix=adj_matrix
+        )
+    elif args.model_type == "bert_chunk":
+        print(f"Using ClinicalBERTChunkAttention model with chunk_size={args.chunk_size}...")
+        model = ClinicalBERTChunkAttention(
+            bert_model_path=args.pretrained_model_name,
+            chunk_size=args.chunk_size,
+            term_counts=args.term_count,
+            label_loader=label_loader,
+            use_gnn=args.use_gnn,
+            adj_matrix=adj_matrix
+        )
+    elif args.model_type == "bert_chunk_v2":
+        print(f"Using ClinicalBERTChunkAttentionV2 model with chunk_size={args.chunk_size}, aggregation={args.chunk_aggregation}...")
+        model = ClinicalBERTChunkAttentionV2(
+            bert_model_path=args.pretrained_model_name,
+            chunk_size=args.chunk_size,
+            term_counts=args.term_count,
+            label_loader=label_loader,
+            use_gnn=args.use_gnn,
+            adj_matrix=adj_matrix,
+            chunk_aggregation=args.chunk_aggregation
+        )
+    else:
+        raise ValueError(f"Unsupported model type: {args.model_type}")
     
     model.to(device)
     
