@@ -75,8 +75,8 @@ class ClinicalLongformerLabelAttention(nn.Module):
         # 标签感知注意力
         self.attention = LabelAttention(
             attention_head=term_counts,
-            rep_droupout_num=0.1,
-            head_pooling="max",
+            rep_droupout_num=0.2,
+            head_pooling="concat",
             att_dropout_num=0.1,
             attention_dim=hidden_size,
             num_labels=self.num_labels,
@@ -205,7 +205,7 @@ class ClinicalBERTChunkAttention(nn.Module):
         super().__init__()
         
         # BERT编码器
-        self.bert_model = AutoModel.from_pretrained(bert_model_path)
+        self.bert_model = AutoModel.from_pretrained(bert_model_path,add_pooling_layer=False)
         self.chunk_size = chunk_size
         hidden_size = self.bert_model.config.hidden_size
         
@@ -246,8 +246,8 @@ class ClinicalBERTChunkAttention(nn.Module):
         # 标签感知注意力
         self.attention = LabelAttention(
             attention_head=term_counts,
-            rep_droupout_num=0.1,
-            head_pooling="max",
+            rep_droupout_num=0.2,
+            head_pooling="concat",
             att_dropout_num=0.1,
             attention_dim=hidden_size,
             num_labels=self.num_labels,
@@ -457,7 +457,7 @@ class ClinicalBERTChunkAttentionV2(nn.Module):
         self.attention = LabelAttention(
             attention_head=term_counts,
             rep_droupout_num=0.1,
-            head_pooling="max",
+            head_pooling="concat",
             att_dropout_num=0.1,
             attention_dim=hidden_size,
             num_labels=self.num_labels,
