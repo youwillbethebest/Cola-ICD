@@ -27,7 +27,7 @@ class ClinicalLongformerLabelAttention(nn.Module):
                  adj_matrix: Optional[torch.Tensor] = None):
         super().__init__()
         # 文本编码器
-        self.model = AutoModel.from_pretrained(longformer_path)
+        self.model = AutoModel.from_pretrained(longformer_path,add_pooling_layer=False)
         hidden_size = self.model.config.hidden_size
 
         # ---------------- 标签加载 ----------------
@@ -414,7 +414,7 @@ class ClinicalBERTChunkAttentionV2(nn.Module):
         super().__init__()
         
         # BERT编码器
-        self.bert_model = AutoModel.from_pretrained(bert_model_path)
+        self.bert_model = AutoModel.from_pretrained(bert_model_path,add_pooling_layer=False)
         self.chunk_size = chunk_size
         self.chunk_aggregation = chunk_aggregation  # "mean", "max", "sum", "weighted"
         hidden_size = self.bert_model.config.hidden_size
