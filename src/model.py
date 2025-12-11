@@ -404,6 +404,7 @@ class ClinicalBERTChunkAttentionV2(nn.Module):
     def __init__(self,
                  bert_model_path: str,
                  chunk_size: int = 512,
+                 overlap: int = 0,
                  codes_file: str | None = None,
                  label_model_name: str = "Bio_ClinicalBERT",
                  term_counts: int = 1,
@@ -416,6 +417,10 @@ class ClinicalBERTChunkAttentionV2(nn.Module):
         # BERT编码器
         self.bert_model = AutoModel.from_pretrained(bert_model_path,add_pooling_layer=False)
         self.chunk_size = chunk_size
+        self.overlap = max(0, int(overlap))
+        if self.overlap >= self.chunk_size:
+            raise ValueError("overlap 必须小于 chunk_size")
+        self.stride = self.chunk_size - self.overlap
         self.chunk_aggregation = chunk_aggregation  # "mean", "max", "sum", "weighted"
         hidden_size = self.bert_model.config.hidden_size
         
@@ -519,19 +524,35 @@ class ClinicalBERTChunkAttentionV2(nn.Module):
         """
         batch_size, total_tokens = input_ids.shape
         
-        # 计算需要的chunk数量
-        num_chunks = (total_tokens + self.chunk_size - 1) // self.chunk_size
-        
-        # padding到chunk边界
-        padded_length = num_chunks * self.chunk_size
-        if padded_length > total_tokens:
-            pad_length = padded_length - total_tokens
-            input_ids = F.pad(input_ids, (0, pad_length), value=0)
-            attention_mask = F.pad(attention_mask, (0, pad_length), value=0)
-        
-        # 分块
-        chunked_input_ids = input_ids.view(batch_size, num_chunks, self.chunk_size)
-        chunked_attention_mask = attention_mask.view(batch_size, num_chunks, self.chunk_size)
+        # 计算 stride 与需要的 padding，使滑窗覆盖到末尾
+        stride = self.stride  # = chunk_size - overlap
+        if stride <= 0:
+            raise ValueError("stride 必须为正数。请确保 overlap < chunk_size。")
+
+        if self.overlap == 0:
+            # 保持原有按整块切分的逻辑
+            num_chunks = (total_tokens + self.chunk_size - 1) // self.chunk_size
+            padded_length = num_chunks * self.chunk_size
+            if padded_length > total_tokens:
+                pad_length = padded_length - total_tokens
+                input_ids = F.pad(input_ids, (0, pad_length), value=0)
+                attention_mask = F.pad(attention_mask, (0, pad_length), value=0)
+            chunked_input_ids = input_ids.view(batch_size, num_chunks, self.chunk_size)
+            chunked_attention_mask = attention_mask.view(batch_size, num_chunks, self.chunk_size)
+        else:
+            # 计算需要的padding，使最后一个窗口起点不超过 total_tokens-1
+            # 使 (num_chunks-1)*stride + chunk_size >= total_tokens
+            num_chunks = (max(0, total_tokens - self.chunk_size) + stride) // stride + 1
+            effective_length = (num_chunks - 1) * stride + self.chunk_size
+            if effective_length > total_tokens:
+                pad_length = effective_length - total_tokens
+                input_ids = F.pad(input_ids, (0, pad_length), value=0)
+                attention_mask = F.pad(attention_mask, (0, pad_length), value=0)
+            # 使用 unfold 生成滑窗块
+            # (N, L) -> (N, num_chunks, chunk_size)
+            chunked_input_ids = input_ids.unfold(dimension=1, size=self.chunk_size, step=stride)
+            chunked_attention_mask = attention_mask.unfold(dimension=1, size=self.chunk_size, step=stride)
+            # unfold 返回 (N, num_chunks, chunk_size)
         
         # 获取标签嵌入
         label_embs_for_attention, label_proto_for_contrastive = self.get_label_embeddings()

@@ -75,6 +75,56 @@ class LabelAttention(nn.Module):
     else:
             logits = self.get_logits(m)
     return logits, m
+
+  def get_attention_alpha(self, h, word_mask, label_feat, aggregate: str = "mean"):
+    """
+    返回标签-序列级注意力权重，用于可视化/分析。
+
+    Args:
+      h:           [B, L, H] 文本隐藏表示
+      word_mask:   [B, L]    有效 token 掩码（1 有效，0 padding）
+      label_feat:  [(C*k), H] 标签术语/多头拼接后的特征
+      aggregate:   "mean" | "max" | "none"，按 head 聚合方式（k=head数）
+
+    Returns:
+      alpha_full: [B, C, L, k] 未聚合注意力
+      alpha_agg:  [B, C, L]    聚合后的注意力（当 aggregate != "none"）或 None
+    """
+    z = torch.tanh(self.W(h))  # [B, L, H]
+    B, L, att_dim = z.size()
+    k = self.attention_head
+    C = label_feat.size(0) // k
+
+    # [C, k, H]
+    u_reshape = label_feat.reshape(C, k, att_dim)
+
+    # [B, C, L, k]  在序列维上做 softmax
+    score = contract('bld,ckd->bclk', z, u_reshape)
+
+    mask = word_mask.bool()
+    score = score.masked_fill(
+      ~mask[:, 0:score.shape[2]].unsqueeze(1).unsqueeze(-1).expand_as(score),
+      float('-1e6')
+    )
+
+    alpha_full = F.softmax(score, dim=2)
+
+    if hasattr(self, "att_dropout"):
+      alpha_full = self.att_dropout(alpha_full)
+      if self.training:
+        alpha_sum = torch.clamp(alpha_full.sum(dim=2, keepdim=True), 1e-5)
+        alpha_full = alpha_full / alpha_sum
+
+    if aggregate == "mean":
+      alpha_agg = alpha_full.mean(dim=-1)  # [B, C, L]
+    elif aggregate == "max":
+      alpha_agg = alpha_full.max(dim=-1)[0]
+    elif aggregate == "none":
+      alpha_agg = None
+    else:
+      raise ValueError("aggregate must be one of {'mean','max','none'}")
+
+    return alpha_full, alpha_agg
   
   def get_logits(self, m, w=None, b=None):
         # logits = self.final(m).squeeze(-1)

@@ -120,6 +120,8 @@ def parse_args():
                         help="模型类型选择")
     parser.add_argument("--chunk_size", type=int, default=512,
                         help="BERT chunk模型的chunk大小")
+    parser.add_argument("--overlap", type=int, default=32,
+                        help="BERT chunk模型的重叠大小（仅对 bert_chunk_v2 生效）")
     parser.add_argument("--chunk_aggregation", type=str, default="max",
                         choices=["mean", "max", "sum", "weighted"],
                         help="Chunk聚合方式 (仅对bert_chunk_v2有效)")
@@ -278,10 +280,11 @@ def main_worker(rank, args):
             adj_matrix=adj_matrix
         )
     elif args.model_type == "bert_chunk_v2":
-        print(f"Using ClinicalBERTChunkAttentionV2 model with chunk_size={args.chunk_size}, aggregation={args.chunk_aggregation}...")
+        print(f"Using ClinicalBERTChunkAttentionV2 model with chunk_size={args.chunk_size}, overlap={args.overlap}, aggregation={args.chunk_aggregation}...")
         model = ClinicalBERTChunkAttentionV2(
             bert_model_path=args.pretrained_model_name,
             chunk_size=args.chunk_size,
+            overlap=args.overlap,
             term_counts=args.term_count,
             label_loader=label_loader,
             use_gnn=args.use_gnn,
@@ -429,7 +432,7 @@ def main():
     args = parse_args()
     if not args.output_dir:
         # 为输出目录添加小时级时间戳，格式：YYYYMMDD_HH
-        timestamp = datetime.now().strftime("%Y%m%d_%H")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
         args.output_dir = os.path.join("checkpoints", timestamp)
 
     if args.use_ddp and torch.cuda.device_count() > 1:

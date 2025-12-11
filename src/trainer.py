@@ -6,11 +6,13 @@ from torch.utils.data import DataLoader
 from src.metric import MetricCollection
 from tqdm import tqdm
 from typing import Dict
+import json
 from torch.amp import autocast
 from torch.amp import GradScaler
 import wandb
 import torch.distributed as dist
 import pandas as pd  # 新增，用于保存 feather 文件
+import numpy as np
 
 class Trainer:
     """
@@ -231,6 +233,12 @@ class Trainer:
         if data_loader == "test" and (not self.use_ddp or self.rank == 0):
             # 保存二值化预测到 feather 文件
             self._save_predictions(all_logits, loader.dataset)
+            # 额外导出注意力贡献（raw_text、pred_codes、true_codes、每标签 top-N token 贡献）
+            try:
+                self._export_attention_contributions(loader, top_labels=5, top_tokens=10,
+                                                     save_name="test_attention_contrib.jsonl")
+            except Exception as e:
+                print(f"[WARN] 导出注意力贡献失败: {e}")
 
     def save_checkpoint(self, save_path: str):
         """
@@ -493,4 +501,132 @@ class Trainer:
         save_path = os.path.join(self.output_dir, save_name)
         df_pred.to_feather(save_path)
         print(f"Saved predictions to {save_path} (阈值: {self.best_db:.4f})")
+
+    # ------------------------------------------------------------------
+    # 新增：导出注意力贡献 JSONL
+    def _export_attention_contributions(self, loader, top_labels: int = 5, top_tokens: int = 10,
+                                        save_name: str = "test_attention_contrib.jsonl"):
+        """
+        针对 loader（通常为 test_loader）逐样本导出：
+          - raw_text
+          - pred_codes（按 best_db 阈值）
+          - true_codes（数据集中提供）
+          - contributions：对每个预测标签，给出注意力最高的 top-N token 及其权重
+        保存为 JSONL（每行一个样本）。
+        """
+        model = self.model.module if self.use_ddp else self.model
+        model.eval()
+        device = self.device
+        dataset = loader.dataset
+        tokenizer = None
+        if hasattr(dataset, 'text_loader') and hasattr(dataset.text_loader, 'tokenizer'):
+            tokenizer = dataset.text_loader.tokenizer
+        if tokenizer is None:
+            raise RuntimeError("找不到 tokenizer（dataset.text_loader.tokenizer 不存在）")
+
+        # 代码索引映射
+        idx2code = {idx: code for code, idx in dataset.code2idx.items()}
+
+        save_path = os.path.join(self.output_dir, save_name)
+        os.makedirs(self.output_dir, exist_ok=True)
+
+        with torch.no_grad(), open(save_path, 'w', encoding='utf-8') as f:
+            pbar = tqdm(total=len(loader), desc="export_contrib")
+            sample_cursor = 0  # 跟踪已处理样本数量，用于正确索引原始数据
+            for x_batch, y_batch in loader:
+                input_ids = x_batch['input_ids'].to(device)
+                attention_mask = x_batch['attention_mask'].to(device)
+
+                # 前向与注意力
+                if hasattr(model, 'chunk_and_encode'):
+                    text_hidden, processed_attention_mask = model.chunk_and_encode(input_ids, attention_mask)
+                    label_embs_for_attention, _ = model.get_label_embeddings()
+                    logits, _ = model.attention(text_hidden, processed_attention_mask, label_embs_for_attention)
+                    _, alpha_agg = model.attention.get_attention_alpha(
+                        text_hidden, processed_attention_mask, label_embs_for_attention, aggregate="mean"
+                    )
+                    eff_mask = processed_attention_mask
+                else:
+                    outputs = model.model(input_ids=input_ids, attention_mask=attention_mask)
+                    text_hidden = outputs.last_hidden_state
+                    label_embs_for_attention, _ = model.get_label_embeddings()
+                    logits, _ = model.attention(text_hidden, attention_mask, label_embs_for_attention)
+                    _, alpha_agg = model.attention.get_attention_alpha(
+                        text_hidden, attention_mask, label_embs_for_attention, aggregate="mean"
+                    )
+                    eff_mask = attention_mask
+
+                probs = torch.sigmoid(logits)  # [B, C]
+                preds_bin = (probs > self.best_db).int()  # [B, C]
+
+                B, L = input_ids.size()
+                valid_lens = eff_mask.sum(dim=1).tolist()
+
+                for b in range(B):
+                    global_idx = sample_cursor + b
+
+                    # 非 Subset：直接以全局样本下标读取对应文本与标签
+                    raw_text = dataset.texts[global_idx] if hasattr(dataset, 'texts') else None
+                    true_codes = dataset.targets[global_idx] if hasattr(dataset, 'targets') else []
+
+
+                    # 将 true_codes 转为可 JSON 序列化的纯 Python 类型
+                    if isinstance(true_codes, np.ndarray):
+                        true_codes = true_codes.tolist()
+                    if isinstance(true_codes, (list, tuple)):
+                        sanitized = []
+                        for x in true_codes:
+                            if isinstance(x, (np.integer,)):
+                                sanitized.append(int(x))
+                            elif isinstance(x, (np.floating,)):
+                                sanitized.append(float(x))
+                            elif isinstance(x, (np.bool_,)):
+                                sanitized.append(bool(x))
+                            else:
+                                sanitized.append(x)
+                        true_codes = sanitized
+
+                    # 预测标签索引，按概率排序取前 top_labels 再与阈值交集，若为空则退回纯 top-k
+                    prob_b = probs[b].detach().cpu()
+                    pred_mask = preds_bin[b].bool().detach().cpu()
+                    sorted_idx = torch.argsort(prob_b, descending=True).tolist()
+                    pred_idx = [i for i in sorted_idx if pred_mask[i].item()]
+                    if len(pred_idx) == 0:
+                        pred_idx = sorted_idx[:top_labels]
+                    else:
+                        pred_idx = pred_idx[:top_labels]
+                    pred_codes = [idx2code[i] for i in pred_idx]
+
+                    # tokens（对齐到有效长度）
+                    ids_b = input_ids[b, :valid_lens[b]].detach().cpu().tolist()
+                    tokens = tokenizer.convert_ids_to_tokens(ids_b)
+
+                    # 注意力贡献（按标签）
+                    contrib = {}
+                    att_b = alpha_agg[b, :, :valid_lens[b]].detach().cpu()  # [C, L]
+                    for i, code in zip(pred_idx, pred_codes):
+                        att_i = att_b[i]  # [L]
+                        # 选择 top_tokens 个 token
+                        topk = min(top_tokens, att_i.numel())
+                        vals, inds = torch.topk(att_i, k=topk)
+                        items = []
+                        for score, idx in zip(vals.tolist(), inds.tolist()):
+                            items.append({
+                                "token_index": int(idx),
+                                "token": tokens[idx] if idx < len(tokens) else "",
+                                "score": float(score)
+                            })
+                        contrib[code] = items
+
+                    rec = {
+                        "text": raw_text,
+                        "pred_codes": pred_codes,
+                        "true_codes": true_codes,
+                        "topk_token_contrib": contrib
+                    }
+                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                sample_cursor += B
+                pbar.update(1)
+            pbar.close()
+        print(f"Saved attention contributions to {save_path}")
     
