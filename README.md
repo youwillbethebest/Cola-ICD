@@ -1,32 +1,20 @@
-# AttentionICD: Label Attention-based ICD Code Prediction
 
-基于标签注意力机制的ICD编码自动分类系统。本项目使用预训练语言模型结合标签注意力机制，实现对临床文本的多标签ICD编码分类。
+## 🔧 Environment Setup
 
-## 📋 目录
-
-- [环境配置](#环境配置)
-- [数据准备](#数据准备)
-- [项目结构](#项目结构)
-- [快速开始](#快速开始)
-- [参数说明](#参数说明)
-- [模型评估](#模型评估)
-
-## 🔧 环境配置
-
-### 1. 创建 Conda 环境
+### 1. Create Conda Environment
 
 ```bash
 conda create -n attentionicd python=3.10
 conda activate attentionicd
 ```
 
-### 2. 安装依赖
+### 2. Install Dependencies
 
 ```bash
-# 安装 PyTorch (根据您的CUDA版本调整)
+# Install PyTorch (adjust according to your CUDA version)
 pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
 
-# 安装其他核心依赖
+# Install other core dependencies
 pip install transformers==4.51.3
 pip install pandas==2.2.3
 pip install pyarrow==18.1.0
@@ -35,83 +23,56 @@ pip install wandb==0.21.0
 pip install sentence-transformers==3.3.1
 pip install torch-geometric==2.6.1
 
-# 安装 PyG 相关库 (根据CUDA版本调整)
+# Install PyG related libraries (adjust according to CUDA version)
 pip install torch_scatter torch_sparse torch_cluster torch_spline_conv -f https://data.pyg.org/whl/torch-2.6.0+cu124.html
 ```
 
-### 3. 下载预训练模型
+### 3. Download Pretrained Models
 
-项目使用以下预训练模型，需要提前下载：
+The project uses the following pretrained models that need to be downloaded in advance:
 
 ```bash
-# 文本编码器 (选择其一)
+# Text Encoder (choose one)
 # - Clinical-Longformer: https://huggingface.co/yikuan8/Clinical-Longformer
 # - SapBERT: https://huggingface.co/cambridgeltl/SapBERT-from-PubMedBERT-fulltext
 
-# 标签编码器
+# Label Encoder
 # - Bio_ClinicalBERT: https://huggingface.co/emilyalsentzer/Bio_ClinicalBERT
 # - SapBERT: https://huggingface.co/cambridgeltl/SapBERT-from-PubMedBERT-fulltext
 ```
 
-将模型下载到项目根目录下对应的文件夹：
-- `Clinical-Longformer/`
-- `Bio_ClinicalBERT/`
-- `SapBERT-from-PubMedBERT-fulltext/` (如使用)
 
-## 📁 数据准备
+## 📁 Data Preparation
+### 1. MIMIC Dataset Access
+Due to the privacy regulations associated with clinical data, we cannot provide the MIMIC-III dataset directly.
+* Please request access to MIMIC-III (v1.4) via [PhysioNet](https://physionet.org/content/mimiciii/).
+* Complete the required CITI training and sign the Data Use Agreement.
 
-### 数据格式
+### 2. Preprocessing
+To ensure a fair comparison with baselines, we follow the standard data preprocessing pipeline and splits established by Edin et al. (2023)** (see their [reproducibility study](https://github.com/JoakimEdin/medical-coding-reproducibility)).
 
-训练数据需要是 `.feather` 格式的 DataFrame，包含以下列：
-- `TEXT`: 临床文本内容
-- `LABELS`: ICD编码列表
-
-ICD编码文件需包含：
-- `icd_code`: ICD编码
-- `long_title`: 编码描述
-
-### 数据目录结构
+### Data Directory Structure
 
 ```
 data/
-├── mimiciii_full/                    # MIMIC-III 全量数据
-│   ├── MIMICIII_train.feather        # 训练集
-│   ├── MIMICIII_val.feather          # 验证集
-│   ├── MIMICIII_test.feather         # 测试集
-│   └── icd9_codes_mimiciii.feather   # ICD编码及描述
-├── mimiciii_50/                      # MIMIC-III Top-50 子集
+├── mimiciii_full/                    # MIMIC-III full dataset
+│   ├── MIMICIII_train.feather        # Training set
+│   ├── MIMICIII_val.feather          # Validation set
+│   ├── MIMICIII_test.feather         # Test set
+│   └── icd9_codes_mimiciii.feather   # ICD codes and descriptions
+├── mimiciii_50/                      # MIMIC-III Top-50 subset
 │   ├── mimiciii_50_train.feather
 │   ├── mimiciii_50_val.feather
 │   ├── mimiciii_50_test.feather
 │   └── top50.feather
-├── icd_synonyms_enhanced_gemini.json # ICD同义词文件 (可选)
-└── icd9_abbreviations_gemini.json    # ICD缩写文件 (可选)
+├── icd_synonyms_enhanced_gemini.json # ICD synonyms file (optional)
+└── icd9_abbreviations_gemini.json    # ICD abbreviations file (optional)
 ```
 
-## 📂 项目结构
 
-```
-AttentionICD_new/
-├── main.py                 # 主入口文件
-├── eval.sh                 # 评估脚本
-├── mainterm.sh             # 训练脚本示例
-├── maincontrastive.sh      # 对比学习训练脚本示例
-├── src/
-│   ├── model.py            # 模型定义
-│   ├── module.py           # 注意力机制等模块
-│   ├── data_loader.py      # 数据加载器
-│   ├── trainer.py          # 训练器
-│   ├── metric.py           # 评估指标
-│   └── loss.py             # 损失函数
-├── data/                   # 数据目录
-├── checkpoints/            # 模型检查点保存目录
-├── Clinical-Longformer/    # 预训练模型
-└── Bio_ClinicalBERT/       # 预训练模型
-```
+## 🚀 Quick Start
 
-## 🚀 快速开始
-
-### 1. 基础训练
+### 1. Basic Training
 
 ```bash
 python main.py \
@@ -130,7 +91,7 @@ python main.py \
     --early_stopping
 ```
 
-### 2. 使用对比学习训练
+### 2. Training with Contrastive Learning
 
 ```bash
 python main.py \
@@ -152,7 +113,7 @@ python main.py \
     --contrastive_temperature 0.3
 ```
 
-### 3. 使用同义词增强
+### 3. Training with Synonym Enhancement
 
 ```bash
 python main.py \
@@ -171,80 +132,73 @@ python main.py \
     --early_stopping
 ```
 
-### 4. 使用 SLURM 提交作业
 
-如果您使用 SLURM 集群，可以参考以下脚本：
+## ⚙️ Parameter Description
 
-```bash
-sbatch mainterm.sh
-```
+### Data-related Parameters
 
-## ⚙️ 参数说明
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--train_file` | - | Training set path (.feather) |
+| `--val_file` | - | Validation set path (.feather) |
+| `--test_file` | - | Test set path (.feather) |
+| `--codes_file` | - | ICD code file path (.feather) |
+| `--synonyms_file` | - | Synonyms file path (.json, optional) |
+| `--abbreviations_file` | - | Abbreviations file path (.json, optional) |
 
-### 数据相关参数
+### Model-related Parameters
 
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `--train_file` | - | 训练集路径 (.feather) |
-| `--val_file` | - | 验证集路径 (.feather) |
-| `--test_file` | - | 测试集路径 (.feather) |
-| `--codes_file` | - | ICD编码文件路径 (.feather) |
-| `--synonyms_file` | - | 同义词文件路径 (.json, 可选) |
-| `--abbreviations_file` | - | 缩写文件路径 (.json, 可选) |
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--pretrained_model_name` | Clinical-Longformer | Pretrained model for text encoder |
+| `--label_model_name` | Bio_ClinicalBERT | Pretrained model for label encoder |
+| `--model_type` | longformer | Model type: longformer, bert_chunk, bert_chunk_v2 |
+| `--chunk_size` | 512 | BERT chunk size |
+| `--term_count` | 1 | Number of synonyms per label |
+| `--max_length` | 4096 | Maximum text length |
 
-### 模型相关参数
+### Training-related Parameters
 
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `--pretrained_model_name` | Clinical-Longformer | 文本编码器预训练模型 |
-| `--label_model_name` | Bio_ClinicalBERT | 标签编码器预训练模型 |
-| `--model_type` | longformer | 模型类型: longformer, bert_chunk, bert_chunk_v2 |
-| `--chunk_size` | 512 | BERT chunk大小 |
-| `--term_count` | 1 | 每个标签使用的同义词数量 |
-| `--max_length` | 4096 | 文本最大长度 |
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--batch_size` | 12 | Batch size |
+| `--epochs` | 5 | Number of training epochs |
+| `--lr` | 2e-5 | Learning rate |
+| `--warmup_steps` | 0 | Warmup steps |
+| `--weight_decay` | 0.0 | Weight decay |
+| `--early_stopping` | False | Whether to enable early stopping |
+| `--early_stopping_patience` | 5 | Early stopping patience |
+| `--scheduler_type` | cosine | Learning rate scheduler type |
 
-### 训练相关参数
+### Contrastive Learning Parameters
 
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `--batch_size` | 12 | 批次大小 |
-| `--epochs` | 5 | 训练轮数 |
-| `--lr` | 2e-5 | 学习率 |
-| `--warmup_steps` | 0 | 预热步数 |
-| `--weight_decay` | 0.0 | 权重衰减 |
-| `--early_stopping` | False | 是否启用早停 |
-| `--early_stopping_patience` | 5 | 早停耐心值 |
-| `--scheduler_type` | cosine | 学习率调度器类型 |
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--use_contrastive` | False | Whether to enable contrastive learning |
+| `--contrastive_loss_weight` | 0.1 | Contrastive learning loss weight |
+| `--contrastive_temperature` | 0.1 | Contrastive learning temperature |
 
-### 对比学习参数
+### GNN-related Parameters
 
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `--use_contrastive` | False | 是否启用对比学习 |
-| `--contrastive_loss_weight` | 0.1 | 对比学习损失权重 |
-| `--contrastive_temperature` | 0.1 | 对比学习温度参数 |
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--use_gnn` | False | Whether to enable GNN |
+| `--adj_matrix_mode` | ppmi | Adjacency matrix mode: binary, count, ppmi, hierarchy |
 
-### GNN相关参数
+### Other Parameters
 
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `--use_gnn` | False | 是否启用GNN |
-| `--adj_matrix_mode` | ppmi | 邻接矩阵模式: binary, count, ppmi, hierarchy |
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--use_wandb` | False | Whether to enable W&B logging |
+| `--use_amp` | True | Whether to use mixed precision training |
+| `--output_dir` | checkpoints/{timestamp} | Model save directory |
+| `--threshold` | 0.5 | Classification threshold |
 
-### 其他参数
+## 📊 Model Evaluation
 
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `--use_wandb` | False | 是否启用W&B日志 |
-| `--use_amp` | True | 是否使用混合精度训练 |
-| `--output_dir` | checkpoints/{timestamp} | 模型保存目录 |
-| `--threshold` | 0.5 | 分类阈值 |
+### Evaluate Trained Models
 
-## 📊 模型评估
-
-### 评估已训练的模型
-
-设置 `--epochs 0` 并指定 `--output_dir` 为已保存的模型目录：
+Set `--epochs 0` and specify `--output_dir` as the saved model directory:
 
 ```bash
 python main.py \
@@ -258,33 +212,12 @@ python main.py \
     --output_dir checkpoints/your_checkpoint_dir
 ```
 
-### 评估指标
+### Evaluation Metrics
 
-模型使用以下评估指标：
-- **Precision (Macro/Micro)**: 精确率
-- **Recall (Macro/Micro)**: 召回率
-- **F1 Score (Macro/Micro)**: F1分数
-- **AUC (Macro/Micro)**: ROC曲线下面积
-- **Precision@K** (K=5, 8, 10, 15): Top-K精确率
-- **MAP**: 平均精确率均值
-
-## 💡 硬件要求
-
-- **GPU**: 推荐使用 NVIDIA H100 (80GB) 或 A100 (40GB/80GB)
-- **内存**: 至少 128GB RAM (推荐 350GB)
-- **存储**: 至少 50GB 可用空间
-
-## 📝 注意事项
-
-1. **数据隐私**: MIMIC数据集需要通过PhysioNet申请访问权限
-2. **显存管理**: 如果显存不足，可以减小 `batch_size` 或 `chunk_size`
-3. **训练时间**: MIMIC-III全量数据集训练约需12-24小时（单GPU）
-
-## 📧 联系方式
-
-如有问题，请联系项目维护者。
-
-## 📄 License
-
-本项目仅供学术研究使用。
-
+The model uses the following evaluation metrics:
+- **Precision (Macro/Micro)**: Precision rate
+- **Recall (Macro/Micro)**: Recall rate
+- **F1 Score (Macro/Micro)**: F1 score
+- **AUC (Macro/Micro)**: Area Under ROC Curve
+- **Precision@K** (K=5, 8, 10, 15): Top-K precision
+- **MAP**: Mean Average Precision
