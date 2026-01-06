@@ -53,9 +53,9 @@ class FocalLossWithLogits(nn.Module):
 
 class HierarchyConsistencyLoss(nn.Module):
     """
-    有向 parent→child 的层级一致性约束：
+    Directed parent→child hierarchy consistency constraint:
       L = mean(ReLU(margin + s_child - s_parent))
-    默认在 logits 空间计算（更稳）。
+    Computed in logits space by default (more stable).
     """
     def __init__(self, margin: float = 0.0, reduction: str = "mean"):
         super().__init__()

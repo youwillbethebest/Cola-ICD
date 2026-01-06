@@ -11,12 +11,13 @@ from torch.amp import autocast
 from torch.amp import GradScaler
 import wandb
 import torch.distributed as dist
-import pandas as pd  # 新增，用于保存 feather 文件
+import pandas as pd  # Added for saving feather files
 import numpy as np
 
 class Trainer:
     """
-    负责管理优化器、学习率调度器、损失函数、训练/验证循环、多种度量和最佳模型保存。
+    Manages optimizer, learning rate scheduler, loss function, training/validation loops,
+    various metrics and best model saving.
     """
     def __init__(
         self,
@@ -85,7 +86,7 @@ class Trainer:
         self.prev_best = None
 
         self.best_db = 0.5
-        self.current_epoch = 0  # 初始化 current_epoch 属性
+        self.current_epoch = 0  # Initialize current_epoch attribute
 
 
         if self.use_amp:
@@ -93,14 +94,14 @@ class Trainer:
         else:
             self.scaler = None
 
-        # 层级一致性损失
+        # Hierarchy consistency loss
         self.hierarchy_criterion = hierarchy_criterion
-        self.hierarchy_edges = hierarchy_edges  # CPU/任意设备；前向时迁移
+        self.hierarchy_edges = hierarchy_edges  # CPU/any device; migrated during forward pass
         self.hierarchy_loss_weight = hierarchy_loss_weight
 
     def load_checkpoint(self, checkpoint_path: str):
         """
-        加载检查点以继续训练
+        Load checkpoint to resume training.
         """
         if not os.path.exists(checkpoint_path):
             raise FileNotFoundError(f"Checkpoint file not found: {checkpoint_path}")
@@ -121,7 +122,7 @@ class Trainer:
             self.scaler.load_state_dict(checkpoint['scaler'])
         
         self.start_epoch = checkpoint['epoch'] + 1
-        self.best_db = checkpoint.get('db', 0.5)  # 如果检查点中没有'db'键，使用默认值0.5
+        self.best_db = checkpoint.get('db', 0.5)  # Use default 0.5 if 'db' key not in checkpoint
         
         
         print(f"Checkpoint loaded successfully. Resuming from epoch {self.start_epoch}")
@@ -139,14 +140,14 @@ class Trainer:
             self._train_epoch()
             self._validate_epoch("val")
             
-            # 检查早停条件
+            # Check early stopping condition
             if self.early_stopping and self._should_early_stop():
                 break
                 
         if self.epochs > 0:
             self.on_train_end()
         
-        print("\n=== 最终模型评估 ===")
+        print("\n=== Final Model Evaluation ===")
         self.test_begin("best_model.pt")
         self._validate_epoch("val", evaluating_best_model=True)
         self._validate_epoch("test")
@@ -214,11 +215,11 @@ class Trainer:
             all_logits = local_logits
             all_targets = local_targets
 
-        # 仅在主进程做完整指标计算／打印／保存
+        # Only compute/print/save complete metrics on main process
         if self.use_ddp and self.rank != 0:
             return
         self.on_val_end(all_logits.cpu(), all_targets.cpu(), loader_name=data_loader,evaluating_best_model=evaluating_best_model)
-        # 仅在 val 阶段保存最佳模型
+        # Only save best model during val phase
         if data_loader == "val" and not evaluating_best_model:
             best_tensor = self.metrics[data_loader].get_best_metric(self.best_metric_name)
             if best_tensor is not None:
@@ -229,20 +230,20 @@ class Trainer:
                     save_path = os.path.join(self.output_dir, "best_model.pt")
                     self.save_checkpoint(save_path)
                     print(f"Saved best model to {save_path} ({self.best_metric_name}: {self.best_metric:.4f})")
-        # 在测试集上保存预测结果
+        # Save prediction results on test set
         if data_loader == "test" and (not self.use_ddp or self.rank == 0):
-            # 保存二值化预测到 feather 文件
+            # Save binarized predictions to feather file
             self._save_predictions(all_logits, loader.dataset)
-            # 额外导出注意力贡献（raw_text、pred_codes、true_codes、每标签 top-N token 贡献）
+            # Export attention contributions (raw_text, pred_codes, true_codes, per-label top-N token contributions)
             try:
                 self._export_attention_contributions(loader, top_labels=5, top_tokens=10,
                                                      save_name="test_attention_contrib.jsonl")
             except Exception as e:
-                print(f"[WARN] 导出注意力贡献失败: {e}")
+                print(f"[WARN] Failed to export attention contributions: {e}")
 
     def save_checkpoint(self, save_path: str):
         """
-        保存包含模型、优化器、调度器和AMP scaler的完整checkpoint。
+        Save complete checkpoint containing model, optimizer, scheduler and AMP scaler.
         """
         if self.rank == 0:
             if self.use_ddp:
@@ -264,15 +265,15 @@ class Trainer:
 
     def on_train_end(self):
         """
-        训练结束时调用，保存最终模型
+        Called at the end of training to save the final model.
         """
         save_path = os.path.join(self.output_dir, f"final_model.pt")
         self.save_checkpoint(save_path)
         if self.use_wandb and self.save_artifacts and (not self.use_ddp or self.rank == 0):
             best_path = os.path.join(self.output_dir, f"best_model.pt")
             best_artifact = wandb.Artifact(
-                name="Attentionicd-best-model",      # 在 WandB 上的 artifact 名称
-                type="model",                        # artifact 类型
+                name="Attentionicd-best-model",      # Artifact name on WandB
+                type="model",                        # Artifact type
                 description="best checkpoint"
             )
             best_artifact.add_file(best_path)
@@ -285,7 +286,7 @@ class Trainer:
 
     def on_train_epoch_end(self):
         """
-        每个训练 epoch 结束时调用，计算并打印训练集上的所有 batch_update 指标
+        Called at the end of each training epoch to compute and print all batch_update metrics on training set.
         """
         if self.use_ddp:
             self.metrics["train"].sync_counters()
@@ -305,14 +306,14 @@ class Trainer:
         
         self.optimizer.load_state_dict(checkpoint['optimizer'])
         self.scheduler.load_state_dict(checkpoint['scheduler'])
-        self.best_db = checkpoint.get('db', 0.5)  # 如果检查点中没有'db'键，使用默认值0.5
+        self.best_db = checkpoint.get('db', 0.5)  # Use default 0.5 if 'db' key not in checkpoint
         if self.use_amp and self.scaler is not None:
             self.scaler.load_state_dict(checkpoint['scaler'])
         print(f"Loaded model from {checkpoint_path}")
 
     def training_step(self, x_batch, y_batch):
         """
-        单个 batch 的前向计算并返回包含 loss、logits、targets 的字典
+        Forward computation for a single batch, returns dict containing loss, logits, targets.
         """
         input_ids = x_batch['input_ids'].to(self.device)
         attention_mask = x_batch['attention_mask'].to(self.device)
@@ -328,7 +329,7 @@ class Trainer:
                         wandb.log({"train/contrastive_loss": self.loss_cl.item()})
                 else:
                     loss = classification_loss
-                # 层级一致性损失（在 logits 上，sigmoid 前）
+                # Hierarchy consistency loss (on logits, before sigmoid)
                 if self.hierarchy_criterion is not None and self.hierarchy_edges is not None and self.hierarchy_loss_weight > 0:
                     hier_edges = self.hierarchy_edges.to(self.device)
                     self.loss_hier = self.hierarchy_criterion(logits, hier_edges)
@@ -356,7 +357,7 @@ class Trainer:
 
     def validation_step(self, x_batch, y_batch):
         """
-        单个 batch 的验证前向计算并返回包含 logits（已 sigmoid）和 targets 的字典
+        Validation forward computation for a single batch, returns dict containing logits (after sigmoid) and targets.
         """
         input_ids = x_batch['input_ids'].to(self.device)
         attention_mask = x_batch['attention_mask'].to(self.device)
@@ -368,7 +369,7 @@ class Trainer:
 
     def update_metrics(self, outputs: dict,loader_name:str):
         """
-        将 outputs 中的 loss、logits、targets 传给 metrics 集合
+        Pass loss, logits, targets from outputs to metrics collection.
         """
         if 'loss' in outputs:
             outputs['loss'] = outputs['loss'].detach()
@@ -376,7 +377,7 @@ class Trainer:
 
     def log_dict(self, nested_metrics: dict):
         """
-        打印并记录包含 'train'/'val' 子字典的嵌套指标
+        Print and log nested metrics containing 'train'/'val' sub-dictionaries.
         """
         if self.rank == 0:
             logs = {}
@@ -389,7 +390,7 @@ class Trainer:
 
     def on_val_end(self, all_logits, all_targets, loader_name="val", evaluating_best_model=False):
         """
-        评估结束时调用，计算完整 logits/targets 并打印 loader_name 指标，然后重置
+        Called at the end of evaluation, compute complete logits/targets, print loader_name metrics, then reset.
         """
         results = self.metrics[loader_name].compute(logits=all_logits.cpu(), targets=all_targets.cpu())
         if  evaluating_best_model and loader_name == "val":
@@ -398,13 +399,13 @@ class Trainer:
             print(f"Best F1: {best_f1:.4f}")
             print(f"Best DB: {best_db:.4f}")
             self.metrics["test"].set_threshold(best_db)
-        # 使用统一 log_dict 方法记录验证指标
+        # Use unified log_dict method to record validation metrics
         self.log_dict({loader_name: results})
         self.metrics[loader_name].reset_metrics()
 
     def _gather_all(self, tensor: torch.Tensor) -> torch.Tensor:
         """
-        DDP环境下跨进程收集tensor并拼接，返回全量tensor
+        Gather and concatenate tensor across processes in DDP environment, return full tensor.
         """
         tensor_list = [torch.zeros_like(tensor) for _ in range(self.world_size)]
         dist.all_gather(tensor_list, tensor)
@@ -412,7 +413,7 @@ class Trainer:
 
     def _should_early_stop(self) -> bool:
         """
-        检查是否应该触发早停
+        Check whether early stopping should be triggered.
         """
         if not self.early_stopping:
             return False
@@ -468,51 +469,51 @@ class Trainer:
             return best_f1, best_db
 
     # ------------------------------------------------------------------
-    # 新增：保存预测结果
+    # Save prediction results
     def _save_predictions(self, logits: torch.Tensor, dataset, save_name: str = "test_predictions.feather"):
         """
-        将测试集预测结果按 best_db 阈值二值化后，与原始 text、target 一并保存为 feather 文件。
-        - logits: sigmoid 后的概率张量，形状 (n_samples, num_labels)
-        - dataset: ICDMultiLabelDataset，对应测试集，用于获取 text 和 target 原始信息
-        - save_name: 保存文件名，默认 test_predictions.feather
+        Binarize test set predictions using best_db threshold, save together with original text and target to feather file.
+        - logits: probability tensor after sigmoid, shape (n_samples, num_labels)
+        - dataset: ICDMultiLabelDataset, corresponding test set, used to get original text and target info
+        - save_name: save filename, default test_predictions.feather
         """
         if len(logits) != len(dataset):
-            raise ValueError("logits 行数与 dataset 大小不一致，无法对齐保存预测结果")
+            raise ValueError("Number of logits rows does not match dataset size, cannot align and save predictions")
 
-        # 1. 二值化预测
+        # 1. Binarize predictions
         preds = (logits > self.best_db).int().cpu().numpy()  # shape (n_samples, num_labels)
 
-        # 2. 构造 code 列顺序（idx -> code）
+        # 2. Build code column order (idx -> code)
         idx2code = {idx: code for code, idx in dataset.code2idx.items()}
         codes_sorted = [idx2code[idx] for idx in range(len(idx2code))]
 
-        # 3. 组装 DataFrame
+        # 3. Assemble DataFrame
         data_dict = {
             "text": dataset.texts,
-            "target": dataset.targets,  # 使用分号连接保存原始多标签列表
+            "target": dataset.targets,  # Save original multi-label list
         }
-        # 为每个 code 添加预测列
+        # Add prediction column for each code
         for idx, code in enumerate(codes_sorted):
             data_dict[code] = preds[:, idx]
 
         df_pred = pd.DataFrame(data_dict)
 
-        # 4. 保存 feather
+        # 4. Save feather
         save_path = os.path.join(self.output_dir, save_name)
         df_pred.to_feather(save_path)
-        print(f"Saved predictions to {save_path} (阈值: {self.best_db:.4f})")
+        print(f"Saved predictions to {save_path} (threshold: {self.best_db:.4f})")
 
     # ------------------------------------------------------------------
-    # 新增：导出注意力贡献 JSONL
+    # Export attention contributions JSONL
     def _export_attention_contributions(self, loader, top_labels: int = 5, top_tokens: int = 10,
                                         save_name: str = "test_attention_contrib.jsonl"):
         """
-        针对 loader（通常为 test_loader）逐样本导出：
+        Export per-sample data for loader (typically test_loader):
           - raw_text
-          - pred_codes（按 best_db 阈值）
-          - true_codes（数据集中提供）
-          - contributions：对每个预测标签，给出注意力最高的 top-N token 及其权重
-        保存为 JSONL（每行一个样本）。
+          - pred_codes (using best_db threshold)
+          - true_codes (provided by dataset)
+          - contributions: for each predicted label, provide top-N tokens with highest attention weights
+        Save as JSONL (one sample per line).
         """
         model = self.model.module if self.use_ddp else self.model
         model.eval()
@@ -522,9 +523,9 @@ class Trainer:
         if hasattr(dataset, 'text_loader') and hasattr(dataset.text_loader, 'tokenizer'):
             tokenizer = dataset.text_loader.tokenizer
         if tokenizer is None:
-            raise RuntimeError("找不到 tokenizer（dataset.text_loader.tokenizer 不存在）")
+            raise RuntimeError("Cannot find tokenizer (dataset.text_loader.tokenizer does not exist)")
 
-        # 代码索引映射
+        # Code index mapping
         idx2code = {idx: code for code, idx in dataset.code2idx.items()}
 
         save_path = os.path.join(self.output_dir, save_name)
@@ -532,12 +533,12 @@ class Trainer:
 
         with torch.no_grad(), open(save_path, 'w', encoding='utf-8') as f:
             pbar = tqdm(total=len(loader), desc="export_contrib")
-            sample_cursor = 0  # 跟踪已处理样本数量，用于正确索引原始数据
+            sample_cursor = 0  # Track processed sample count for correct indexing of original data
             for x_batch, y_batch in loader:
                 input_ids = x_batch['input_ids'].to(device)
                 attention_mask = x_batch['attention_mask'].to(device)
 
-                # 前向与注意力
+                # Forward pass and attention
                 if hasattr(model, 'chunk_and_encode'):
                     text_hidden, processed_attention_mask = model.chunk_and_encode(input_ids, attention_mask)
                     label_embs_for_attention, _ = model.get_label_embeddings()
@@ -565,12 +566,12 @@ class Trainer:
                 for b in range(B):
                     global_idx = sample_cursor + b
 
-                    # 非 Subset：直接以全局样本下标读取对应文本与标签
+                    # Non-Subset: directly read corresponding text and labels using global sample index
                     raw_text = dataset.texts[global_idx] if hasattr(dataset, 'texts') else None
                     true_codes = dataset.targets[global_idx] if hasattr(dataset, 'targets') else []
 
 
-                    # 将 true_codes 转为可 JSON 序列化的纯 Python 类型
+                    # Convert true_codes to JSON-serializable pure Python types
                     if isinstance(true_codes, np.ndarray):
                         true_codes = true_codes.tolist()
                     if isinstance(true_codes, (list, tuple)):
@@ -586,7 +587,7 @@ class Trainer:
                                 sanitized.append(x)
                         true_codes = sanitized
 
-                    # 预测标签索引，按概率排序取前 top_labels 再与阈值交集，若为空则退回纯 top-k
+                    # Predicted label indices, sorted by probability, take top_labels then intersect with threshold, fallback to pure top-k if empty
                     prob_b = probs[b].detach().cpu()
                     pred_mask = preds_bin[b].bool().detach().cpu()
                     sorted_idx = torch.argsort(prob_b, descending=True).tolist()
@@ -597,16 +598,16 @@ class Trainer:
                         pred_idx = pred_idx[:top_labels]
                     pred_codes = [idx2code[i] for i in pred_idx]
 
-                    # tokens（对齐到有效长度）
+                    # tokens (aligned to valid length)
                     ids_b = input_ids[b, :valid_lens[b]].detach().cpu().tolist()
                     tokens = tokenizer.convert_ids_to_tokens(ids_b)
 
-                    # 注意力贡献（按标签）
+                    # Attention contributions (per label)
                     contrib = {}
                     att_b = alpha_agg[b, :, :valid_lens[b]].detach().cpu()  # [C, L]
                     for i, code in zip(pred_idx, pred_codes):
                         att_i = att_b[i]  # [L]
-                        # 选择 top_tokens 个 token
+                        # Select top_tokens tokens
                         topk = min(top_tokens, att_i.numel())
                         vals, inds = torch.topk(att_i, k=topk)
                         items = []

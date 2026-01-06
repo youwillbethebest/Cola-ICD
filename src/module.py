@@ -43,7 +43,7 @@ class LabelAttention(nn.Module):
         self.b_linear = MLP(self.attention_dim, self.attention_dim, 1, self.est_cls)
 
       
-      # 添加缺失的 W 线性层
+      # Add missing W linear layer
       self.W = nn.Linear(attention_dim, attention_dim)
       
       if self.head_pooling == "concat":
@@ -78,17 +78,17 @@ class LabelAttention(nn.Module):
 
   def get_attention_alpha(self, h, word_mask, label_feat, aggregate: str = "mean"):
     """
-    返回标签-序列级注意力权重，用于可视化/分析。
+    Return label-sequence level attention weights for visualization/analysis.
 
     Args:
-      h:           [B, L, H] 文本隐藏表示
-      word_mask:   [B, L]    有效 token 掩码（1 有效，0 padding）
-      label_feat:  [(C*k), H] 标签术语/多头拼接后的特征
-      aggregate:   "mean" | "max" | "none"，按 head 聚合方式（k=head数）
+      h:           [B, L, H] text hidden representation
+      word_mask:   [B, L]    valid token mask (1 for valid, 0 for padding)
+      label_feat:  [(C*k), H] label term/multi-head concatenated features
+      aggregate:   "mean" | "max" | "none", aggregation method by head (k=number of heads)
 
     Returns:
-      alpha_full: [B, C, L, k] 未聚合注意力
-      alpha_agg:  [B, C, L]    聚合后的注意力（当 aggregate != "none"）或 None
+      alpha_full: [B, C, L, k] non-aggregated attention
+      alpha_agg:  [B, C, L]    aggregated attention (when aggregate != "none") or None
     """
     z = torch.tanh(self.W(h))  # [B, L, H]
     B, L, att_dim = z.size()
@@ -98,7 +98,7 @@ class LabelAttention(nn.Module):
     # [C, k, H]
     u_reshape = label_feat.reshape(C, k, att_dim)
 
-    # [B, C, L, k]  在序列维上做 softmax
+    # [B, C, L, k]  softmax along sequence dimension
     score = contract('bld,ckd->bclk', z, u_reshape)
 
     mask = word_mask.bool()
@@ -139,70 +139,70 @@ class LabelAttention(nn.Module):
 
 
   def get_label_queried_features(self,h,word_mask,label_feat):
-    # 输入: h [batch_size, seq_length, hidden_dim]
-    # 输出: z [batch_size, seq_length, attention_dim]
+    # Input: h [batch_size, seq_length, hidden_dim]
+    # Output: z [batch_size, seq_length, attention_dim]
     z = torch.tanh(self.W(h))
     
     batch_size, seq_length, att_dim = z.size()
-    # 计算标签数量
+    # Calculate label count
     label_count = label_feat.size(0) // self.attention_head
     
-    # 输入: label_feat [label_count * attention_head, attention_dim]
-    # 输出: u_reshape [label_count, attention_head, attention_dim]
+    # Input: label_feat [label_count * attention_head, attention_dim]
+    # Output: u_reshape [label_count, attention_head, attention_dim]
     u_reshape = label_feat.reshape(label_count, self.attention_head, att_dim)
     
-    # 计算注意力分数
-    # 输入: z [batch_size, seq_length, attention_dim], u_reshape [label_count, attention_head, attention_dim]
-    # 输出: score [batch_size, label_count, seq_length, attention_head]
+    # Calculate attention scores
+    # Input: z [batch_size, seq_length, attention_dim], u_reshape [label_count, attention_head, attention_dim]
+    # Output: score [batch_size, label_count, seq_length, attention_head]
     score = contract('abd,ecd->aebc', z, u_reshape)
     
-    # 处理mask
+    # Process mask
     word_mask = word_mask.bool()
-    # 输入: word_mask [batch_size, seq_length]
-    # 输出: score [batch_size, label_count, seq_length, attention_head] (masked)
+    # Input: word_mask [batch_size, seq_length]
+    # Output: score [batch_size, label_count, seq_length, attention_head] (masked)
     score = score.masked_fill(mask=~word_mask[:,0:score.shape[-2]].unsqueeze(1).unsqueeze(-1).expand_as(score),
                                       value=float('-1e6'))
     
-    # 输入: score [batch_size, label_count, seq_length, attention_head]
-    # 输出: alpha [batch_size, label_count, seq_length, attention_head]
+    # Input: score [batch_size, label_count, seq_length, attention_head]
+    # Output: alpha [batch_size, label_count, seq_length, attention_head]
     alpha = F.softmax(score, dim=2)
     
     if hasattr(self,"att_dropout"):
-      # 应用注意力dropout
+      # Apply attention dropout
       alpha = self.att_dropout(alpha)
       if self.training:
-          # 重新归一化
+          # Re-normalize
           alpha_sum = torch.clamp(alpha.sum(dim=2, keepdim=True), 1e-5)
           alpha = alpha / alpha_sum
     
-    # 加权聚合特征
-    # 输入: h [batch_size, seq_length, hidden_dim], alpha [batch_size, label_count, seq_length, attention_head]
-    # 输出: m [batch_size, label_count, attention_head, hidden_dim//attention_head]
+    # Weighted feature aggregation
+    # Input: h [batch_size, seq_length, hidden_dim], alpha [batch_size, label_count, seq_length, attention_head]
+    # Output: m [batch_size, label_count, attention_head, hidden_dim//attention_head]
     m = contract('abd,aebc->aedc', h, alpha)
     
     if not hasattr(self,"head_pooling") or self.head_pooling == "max":
-        # max pooling: 在attention_head维度上取最大值
-        # 输入: m [batch_size, label_count, attention_head, hidden_dim//attention_head]
-        # 输出: m [batch_size, label_count, hidden_dim//attention_head]
+        # max pooling: take maximum along attention_head dimension
+        # Input: m [batch_size, label_count, attention_head, hidden_dim//attention_head]
+        # Output: m [batch_size, label_count, hidden_dim//attention_head]
         m = m.max(-1)[0]
     elif self.head_pooling == "concat":
-        # concat: 拼接所有head的特征
-        # 输入: m [batch_size, label_count, attention_head, hidden_dim//attention_head]
-        # 输出: m [batch_size, label_count, attention_dim]
+        # concat: concatenate features from all heads
+        # Input: m [batch_size, label_count, attention_head, hidden_dim//attention_head]
+        # Output: m [batch_size, label_count, attention_dim]
         m = self.reduce(m.permute(0,1,3,2))
         m=m.reshape(batch_size, -1, att_dim)
     
-    # 应用dropout
-    # 输入: m [batch_size, label_count, hidden_dim//attention_head] 或 [batch_size, label_count, attention_dim]
-    # 输出: m [batch_size, label_count, hidden_dim//attention_head] 或 [batch_size, label_count, attention_dim]
+    # Apply dropout
+    # Input: m [batch_size, label_count, hidden_dim//attention_head] or [batch_size, label_count, attention_dim]
+    # Output: m [batch_size, label_count, hidden_dim//attention_head] or [batch_size, label_count, attention_dim]
     m = self.rep_dropout(m)
     return m
 class LabelAttentionV2(LabelAttention):
     def __init__(self,attention_head,rep_droupout_num,head_pooling,att_dropout_num,attention_dim,num_labels,est_cls:int=1):
         super().__init__(attention_head,rep_droupout_num,head_pooling,att_dropout_num,attention_dim,num_labels,est_cls)
 
-        # 输入: attention_dim
-        # 输出: attention_dim // attention_head
+        # Input: attention_dim
+        # Output: attention_dim // attention_head
         self.u_reduce = nn.Linear(self.attention_dim,
                                     self.attention_dim // self.attention_head)
 
@@ -283,12 +283,12 @@ class GraphAttentionLayer(nn.Module):
     
 class JaccardWeightedSupConLoss(nn.Module):
     """
-    文本-标签 & 文本-文本 对比学习损失
+    Text-Label & Text-Text Contrastive Learning Loss
 
     Args:
-        temperature: 对比温度 τ
-        eps:         防止除零
-        use_text_text: 是否启用文本-文本分支
+        temperature: contrastive temperature τ
+        eps:         prevent division by zero
+        use_text_text: whether to enable text-text branch
     """
     def __init__(self,
                  temperature: float = 0.07,
@@ -308,37 +308,37 @@ class JaccardWeightedSupConLoss(nn.Module):
         B, H = text_feat.shape
         device = text_feat.device
 
-        # ---- 文本-标签分支 ----
-        # 1) 归一化
+        # ---- Text-Label branch ----
+        # 1) Normalize
         t = F.normalize(text_feat, dim=1)      # (B, H)
         l = F.normalize(label_proto, dim=1)    # (C, H)
-        # 2) 相似度 & exp
+        # 2) Similarity & exp
         sim_tl = torch.matmul(t, l.t()) / self.tau  # (B, C)
         exp_tl = torch.exp(sim_tl)
 
-        # 3) 正样本 mask & log-prob
+        # 3) Positive sample mask & log-prob
         pos_mask = targets.bool()                   # (B, C)
         denom_tl = exp_tl.sum(dim=1, keepdim=True) + self.eps
         logp_pos = torch.log(exp_tl + self.eps) - torch.log(denom_tl)
-        # 4) 按每个样本的正标签数归一化
+        # 4) Normalize by number of positive labels per sample
         pos_count = pos_mask.sum(dim=1).clamp(min=1).float()
         loss_tl = - (logp_pos * pos_mask).sum(dim=1) / pos_count
         loss_text_label = loss_tl.mean()
 
-        # ---- 文本-文本 Jaccard-Weighted SupCon ----
+        # ---- Text-Text Jaccard-Weighted SupCon ----
         if not self.use_text_text:
             return loss_text_label, torch.tensor(0., device=device)
 
-        # 1) 同样归一化 & 计算相似度
+        # 1) Same normalization & compute similarity
         sim_tt = torch.matmul(t, t.t()) / self.tau  # (B, B)
-        # 2) mask 自身对角
+        # 2) Mask diagonal (self)
         diag = torch.eye(B, device=device, dtype=torch.bool)
         sim_tt = sim_tt.masked_fill(diag, float('-inf'))
-        # 3) 用 logsumexp 计算 log-prob
+        # 3) Compute log-prob using logsumexp
         log_denom = torch.logsumexp(sim_tt, dim=1, keepdim=True)  # (B,1)
         logp_tt = sim_tt - log_denom                              # (B, B)
 
-        # 4) 计算 Jaccard 权重
+        # 4) Compute Jaccard weights
         t_bool = targets.bool()
         # intersection & union
         inter = (t_bool.unsqueeze(1) & t_bool.unsqueeze(0)).sum(-1).float()  # (B,B)
@@ -346,11 +346,11 @@ class JaccardWeightedSupConLoss(nn.Module):
         jacc = inter / (union + self.eps)
         jacc = jacc.masked_fill(diag, 0.0)
 
-        # 5) 归一化权重 & detach
+        # 5) Normalize weights & detach
         weight = jacc / (jacc.sum(dim=1, keepdim=True) + self.eps)
         weight = weight.detach()
 
-        # 6) 加权 loss & 取有效行平均
+        # 6) Weighted loss & average over valid rows
         loss_row = -(weight * logp_tt).sum(dim=1)  # (B,)
         valid = weight.sum(dim=1) > 0
         if valid.any():
@@ -363,8 +363,8 @@ class JaccardWeightedSupConLoss(nn.Module):
 
 class PositiveOnlyContrastiveLoss(nn.Module):
     """
-    无负样本对比学习（Positive-Only）：
-    仅对正对儿 (b,i) ↔ proto[i] 最大化相似度，-log σ(sim/τ)
+    Positive-Only Contrastive Learning (No Negative Samples):
+    Only maximize similarity for positive pairs (b,i) ↔ proto[i], -log σ(sim/τ)
     """
     def __init__(self, temperature: float = 0.07, reduction: str = "mean",
                  eps: float = 1e-12, margin: float = 0.0):
@@ -380,11 +380,11 @@ class PositiveOnlyContrastiveLoss(nn.Module):
                 targets: torch.Tensor               # (B, C) multi-hot
                ) -> torch.Tensor:
 
-        # 归一化（显式 eps）
+        # Normalize (explicit eps)
         text_feat  = F.normalize(per_label_text_feat, dim=-1, eps=self.eps)  # (B,C,H)
         proto_feat = F.normalize(label_proto,          dim=-1, eps=self.eps) # (C,H)
 
-        # 同标签相似度 s_ii
+        # Same label similarity s_ii
         sim = torch.einsum("bch,ch->bc", text_feat, proto_feat)             # (B,C)
         sim = sim / max(self.tau, 1e-6)
 
@@ -392,16 +392,16 @@ class PositiveOnlyContrastiveLoss(nn.Module):
         if not pos_mask.any().item():
             return sim.new_zeros(())
 
-        # 正对儿 logistic；可选 margin：softplus(m - sim) 更“判别”
+        # Positive pair logistic; optional margin: softplus(m - sim) more "discriminative"
         if self.margin > 0.0:
             elem_loss = F.softplus(self.margin - sim)                        # (B,C)
         else:
             elem_loss = -F.logsigmoid(sim)                                   # (B,C)
 
-        # 仅正位生效
+        # Only activate for positive positions
         loss_mat = elem_loss * pos_mask.float()                              # (B,C)
 
-        # 按样本内正标签数归一化
+        # Normalize by number of positive labels per sample
         pos_count = pos_mask.sum(dim=1).clamp_min(1).float()                 # (B,)
         per_sample_loss = loss_mat.sum(dim=1) / pos_count                    # (B,)
 
@@ -414,9 +414,9 @@ class PositiveOnlyContrastiveLoss(nn.Module):
         else:
             raise ValueError("reduction must be one of ['mean','sum','none']")
 
-# 新增: 基于相似度的 Hard Negative Miner
+# Hard Negative Miner based on similarity
 class HardNegativeMiner:
-    """根据相似度选取困难负样本 (top-K hardest negatives)。"""
+    """Select hard negative samples based on similarity (top-K hardest negatives)."""
     @staticmethod
     def mine_hard_negatives(
         per_label_text_feat: torch.Tensor,  # (B, C, H)
@@ -424,35 +424,36 @@ class HardNegativeMiner:
         targets: torch.Tensor,             # (B, C)
         k: int
     ) -> torch.Tensor:
-        """返回每个 anchor 的 K 个最难负样本索引 (B, C, K)。"""
-        # 相似度矩阵 (无需除温度, 排序只看大小)
+        """Return K hardest negative sample indices for each anchor (B, C, K)."""
+        # Similarity matrix (no temperature needed, only comparing magnitudes)
         sim_matrix = torch.matmul(per_label_text_feat, label_proto.t())  # (B, C, C)
-        # 负样本掩码
+        # Negative sample mask
         neg_mask = (~targets.bool()).unsqueeze(1).expand_as(sim_matrix)  # (B, C, C)
         masked_sim = sim_matrix.masked_fill(~neg_mask, float('-inf'))
         K = min(k, sim_matrix.size(-1) - 1)
-        # 取每行 top-K hardest negatives
+        # Get top-K hardest negatives per row
         _, neg_indices = torch.topk(masked_sim, k=K, dim=-1)
         return neg_indices
 
 class LabelWiseContrastiveLoss(nn.Module):
     """
-    标签感知的对比学习损失 (Label-Wise Contrastive Loss)
+    Label-Wise Contrastive Loss
     
-    对于每一个正标签，将其对应的文本表征作为"锚点"，
-    其自身的标签原型作为"正样本"，而该样本的所有"负标签"对应的原型作为"负样本"。
+    For each positive label, use its corresponding text representation as "anchor",
+    its own label prototype as "positive sample", and all "negative label" prototypes
+    of that sample as "negative samples".
     """
     def __init__(self, temperature: float = 0.1, eps: float = 1e-12,
                  neg_samples: int = None,
-                 mining_strategy: str = "similarity",  # 可选: similarity / gradient / margin / random(all)
-                 margin: float = 0.1):              # margin hard mining 阈值
+                 mining_strategy: str = "similarity",  # Options: similarity / gradient / margin / random(all)
+                 margin: float = 0.1):              # margin hard mining threshold
         super().__init__()
         self.tau = temperature
         self.eps = eps
         self.neg_samples = neg_samples
         self.mining_strategy = mining_strategy
         self.margin = margin
-        # 若选择相似度挖掘, 初始化 miner
+        # Initialize miner if similarity mining is selected
         if self.mining_strategy == "similarity":
             self.miner = HardNegativeMiner()
 
@@ -462,41 +463,41 @@ class LabelWiseContrastiveLoss(nn.Module):
                 targets: torch.Tensor               # (B, C) multi-hot
                ) -> torch.Tensor:
         
-        # 归一化特征
+        # Normalize features
         per_label_text_feat = F.normalize(per_label_text_feat, dim=-1)
         label_proto = F.normalize(label_proto, dim=-1)
 
-        # 创建正负样本的掩码
+        # Create positive/negative sample masks
         pos_mask = targets.bool() # (B, C)
         
-        # 如果批次内没有正样本，则损失为0
+        # If no positive samples in batch, loss is 0
         if not pos_mask.any():
             return torch.tensor(0., device=per_label_text_feat.device)
             
-        # 计算每个"标签定制的文本表征"与"所有标签原型"之间的相似度
+        # Compute similarity between each "label-customized text representation" and "all label prototypes"
         # (B, C, H) x (H, C) -> (B, C, C)
         # sim_matrix[b, i, j] = sim(text_feat_for_label_i, proto_for_label_j)
         sim_matrix = torch.matmul(per_label_text_feat, label_proto.t()) / self.tau
 
-        # --- 核心修改：为每个 anchor 构建正确的正负样本集 ---
+        # --- Core modification: build correct positive/negative sample sets for each anchor ---
 
-        # 1. 提取正样本相似度
-        # 对于 anchor (b, i), 正样本是 label_proto i.
-        # 相似度在 sim_matrix 的对角线上
+        # 1. Extract positive sample similarity
+        # For anchor (b, i), positive sample is label_proto i.
+        # Similarity is on the diagonal of sim_matrix
         pos_sim = torch.diagonal(sim_matrix, offset=0, dim1=-2, dim2=-1) # (B, C)
 
-        # 2. 提取负样本相似度
+        # 2. Extract negative sample similarity
         neg_mask = ~pos_mask  # (B, C)
         if self.mining_strategy == "similarity":
-            # 30% 最难负样本 + 70% 随机负样本
+            # 30% hardest negatives + 70% random negatives
             K = self.neg_samples or (sim_matrix.size(-1) - 1)
             K_hard = int(K * 0.3)
             K_rand = K - K_hard
-            # 最难负样本
+            # Hardest negatives
             hard_idx = self.miner.mine_hard_negatives(
                 per_label_text_feat, label_proto, targets, K_hard
             )  # (B, C, K_hard)
-            # 随机负样本
+            # Random negatives
             B, C, _ = sim_matrix.size()
             rand_idx = []
             for b in range(B):
@@ -507,7 +508,7 @@ class LabelWiseContrastiveLoss(nn.Module):
                     perm = neg_b[torch.randint(0, neg_b.size(0), (K_rand,), device=neg_b.device)]
                 rand_idx.append(perm.unsqueeze(0).repeat(C, 1))
             rand_idx = torch.stack(rand_idx)  # (B, C, K_rand)
-            # 合并并聚合相似度
+            # Merge and aggregate similarity
             neg_indices = torch.cat([hard_idx, rand_idx], dim=-1)               # (B, C, K)
             neg_sim_matrix = torch.gather(sim_matrix, 2, neg_indices)           # (B, C, K)
         elif self.mining_strategy == "gradient":
@@ -515,7 +516,7 @@ class LabelWiseContrastiveLoss(nn.Module):
         elif self.mining_strategy == "margin":
             neg_sim_matrix = self._margin_based_mining(sim_matrix, pos_sim, pos_mask)
         elif self.neg_samples is not None and self.neg_samples > 0:
-            # 随机采样负样本 (保持原逻辑)
+            # Random negative sampling (keep original logic)
             B, C, _ = sim_matrix.size()
             K = min(self.neg_samples, C - 1)
             neg_indices = []
@@ -527,26 +528,26 @@ class LabelWiseContrastiveLoss(nn.Module):
             neg_indices = torch.stack(neg_indices, dim=0)  # (B, C, K)
             neg_sim_matrix = torch.gather(sim_matrix, 2, neg_indices)
         else:
-            # 全量负样本：抹掉正样本，仅保留负样本
+            # Full negatives: mask out positive samples, keep only negatives
             neg_sim_matrix = sim_matrix.masked_fill(
                 pos_mask.unsqueeze(1).expand_as(sim_matrix),
                 float('-inf')
             )
 
-        # 3. 计算 InfoNCE loss
+        # 3. Compute InfoNCE loss
         log_sum_exp_neg = torch.logsumexp(neg_sim_matrix, dim=-1) # (B, C)
         
-        # 分子是正样本相似度, 分母是 (正样本 + 所有负样本)
+        # Numerator is positive sample similarity, denominator is (positive + all negatives)
         # log(P) = log(exp(pos) / (exp(pos) + sum(exp(neg))))
         #        = pos_sim - log(exp(pos_sim) + exp(log_sum_exp_neg))
         #        = pos_sim - logaddexp(pos_sim, log_sum_exp_neg)
         log_prob = pos_sim - torch.logaddexp(pos_sim, log_sum_exp_neg)
 
-        # 4. 计算最终损失
-        # 只对存在的正样本(anchor)计算损失
+        # 4. Compute final loss
+        # Only compute loss for existing positive samples (anchors)
         loss = -log_prob * pos_mask
         
-        # 按每个样本的正标签数量进行归一化
+        # Normalize by number of positive labels per sample
         pos_count = pos_mask.sum(dim=1).clamp(min=1).float()
         loss = loss.sum(dim=1) / pos_count
         
@@ -554,11 +555,11 @@ class LabelWiseContrastiveLoss(nn.Module):
 
     # ----------------- hard mining helpers -----------------
     def _gradient_based_mining(self, sim_matrix: torch.Tensor, pos_mask: torch.Tensor) -> torch.Tensor:
-        """基于梯度大小(近似)的 hard negative mining。"""
+        """Hard negative mining based on gradient magnitude (approximate)."""
         neg_mask = ~pos_mask  # (B, C)
         neg_mask_expand = neg_mask.unsqueeze(1).expand_as(sim_matrix)  # (B, C, C)
         masked_sim = sim_matrix.masked_fill(~neg_mask_expand, float('-inf'))
-        # 使用 exp(sim) 作为梯度近似
+        # Use exp(sim) as gradient approximation
         grad_score = torch.exp(masked_sim)
         K = min(self.neg_samples or (sim_matrix.size(-1) - 1), sim_matrix.size(-1) - 1)
         _, neg_indices = torch.topk(grad_score, k=K, dim=-1)
@@ -567,11 +568,11 @@ class LabelWiseContrastiveLoss(nn.Module):
 
     def _margin_based_mining(self, sim_matrix: torch.Tensor, pos_sim: torch.Tensor,
                               pos_mask: torch.Tensor) -> torch.Tensor:
-        """基于 margin 的 hard negative mining。"""
+        """Hard negative mining based on margin."""
         B, C, _ = sim_matrix.size()
         neg_mask = ~pos_mask  # (B, C)
         pos_sim_expand = pos_sim.unsqueeze(-1).expand(-1, -1, C)  # (B, C, C)
-        # 选择满足 pos_sim - neg_sim < margin 的负样本
+        # Select negative samples satisfying pos_sim - neg_sim < margin
         hard_mask = (sim_matrix > (pos_sim_expand - self.margin)) & \
                     neg_mask.unsqueeze(1).expand(-1, C, -1)
         masked_sim = sim_matrix.masked_fill(~hard_mask, float('-inf'))
@@ -581,8 +582,8 @@ class LabelWiseContrastiveLoss(nn.Module):
         return neg_sim_matrix
 class LabelGNN(nn.Module):
     """
-    用于增强标签原型的 GCN 模块。
-    将共现图信息注入到原型表示中。
+    GCN module for enhancing label prototypes.
+    Injects co-occurrence graph information into prototype representations.
     """
     def __init__(self, in_dim: int, hid_dim: int, out_dim: int,
                  dropout: float = 0.1):
@@ -594,19 +595,20 @@ class LabelGNN(nn.Module):
     def forward(self, x: torch.Tensor,
                 edge_index: torch.LongTensor,
                 edge_weight: torch.FloatTensor = None) -> torch.Tensor:
-        # 第一层 GCN + 激活
+        # First GCN layer + activation
         x = self.conv1(x, edge_index, edge_weight)
         x = F.relu(x)
         x = F.dropout(x, p=self.dropout, training=self.training)
-        # 第二层 GCN 输出增强后的原型
+        # Second GCN layer outputs enhanced prototype
         x = self.conv2(x, edge_index, edge_weight)
         return x
 
 class HierLabelGNN(nn.Module):
     """
-    分别沿上下行邻接进行卷积，并以门控融合，残差+LayerNorm 稳定训练。
+    Perform convolution along upward and downward adjacencies separately,
+    with gated fusion, residual + LayerNorm for stable training.
     E' = LN(E0 + σ(Wg E0) ⊙ (W↑ Conv↑(E0) + W↓ Conv↓(E0)))
-    堆叠两层 block。
+    Stack two blocks.
     """
     def __init__(self, in_dim: int, hid_dim: int, out_dim: int, dropout: float = 0.1):
         super().__init__()
@@ -614,10 +616,10 @@ class HierLabelGNN(nn.Module):
         self.down_conv1 = GCNConv(in_dim, hid_dim)
         self.up_conv2 = GCNConv(out_dim, out_dim)
         self.down_conv2 = GCNConv(out_dim, out_dim)
-        # 第一层卷积输出维度为 hid_dim，需要投影到 out_dim
+        # First layer convolution output dim is hid_dim, need to project to out_dim
         self.W_up1 = nn.Linear(hid_dim, out_dim)
         self.W_down1 = nn.Linear(hid_dim, out_dim)
-        # 第二层卷积输出维度为 out_dim，保持 out_dim
+        # Second layer convolution output dim is out_dim, keep out_dim
         self.W_up2 = nn.Linear(out_dim, out_dim)
         self.W_down2 = nn.Linear(out_dim, out_dim)
         self.Wg1 = nn.Linear(in_dim, out_dim)
@@ -638,10 +640,10 @@ class HierLabelGNN(nn.Module):
     def forward(self, x: torch.Tensor,
                 up_edge_index: torch.LongTensor, up_edge_weight: torch.FloatTensor,
                 down_edge_index: torch.LongTensor, down_edge_weight: torch.FloatTensor) -> torch.Tensor:
-        # 第一层：hid_dim → out_dim
+        # First layer: hid_dim → out_dim
         x = self._block(x, up_edge_index, up_edge_weight, down_edge_index, down_edge_weight,
                         self.up_conv1, self.down_conv1, self.Wg1, self.ln1, self.W_up1, self.W_down1)
-        # 第二层：out_dim → out_dim
+        # Second layer: out_dim → out_dim
         x = self._block(x, up_edge_index, up_edge_weight, down_edge_index, down_edge_weight,
                         self.up_conv2, self.down_conv2, self.Wg2, self.ln2, self.W_up2, self.W_down2)
         return x

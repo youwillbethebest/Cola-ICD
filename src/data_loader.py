@@ -10,13 +10,13 @@ import random
 import re
 import os
 
-# ---------------- 新增：ICD9 层级推断 & 构图 ----------------
+# ---------------- ICD9 Hierarchy Inference & Graph Building ----------------
 def _infer_parent(code: str, code_set: set[str]) -> str | None:
     """
-    基于 ICD-9 代码字符串前缀推断最近父级：
-    - 逐步去掉末尾字符；若末尾是 '.' 则一并去掉；
-    - 一旦得到的前缀在 code_set 中，返回该前缀作为最近父级；
-    - 找不到则返回 None。
+    Infer nearest parent based on ICD-9 code string prefix:
+    - Progressively remove trailing characters; if trailing char is '.' remove it too;
+    - Once a prefix is found in code_set, return that prefix as nearest parent;
+    - Return None if not found.
     """
     cand = code.strip()
     while len(cand) > 1:
@@ -29,9 +29,9 @@ def _infer_parent(code: str, code_set: set[str]) -> str | None:
 
 def build_hierarchy_edges(code2idx: dict, direction: str = "parent_to_child") -> torch.LongTensor:
     """
-    构建 1-hop 层级边（代码级节点）：
-    - direction = 'parent_to_child' 或 'child_to_parent'
-    - 仅返回 edge_index（权重默认为 1，在下游可选用）
+    Build 1-hop hierarchy edges (code-level nodes):
+    - direction = 'parent_to_child' or 'child_to_parent'
+    - Only returns edge_index (weight defaults to 1, optional for downstream use)
     """
     codes = list(code2idx.keys())
     code_set = set(codes)
@@ -52,7 +52,7 @@ def build_hierarchy_edges(code2idx: dict, direction: str = "parent_to_child") ->
 
 def build_hierarchy_adjs(code2idx: dict, device: str = "cpu") -> dict:
     """
-    返回用于消息传递的双向邻接（不含自环；残差在GNN内部做）：
+    Return bidirectional adjacency for message passing (no self-loops; residual done inside GNN):
       - 'up':   child→parent
       - 'down': parent→child
     """
@@ -66,12 +66,12 @@ def build_hierarchy_adjs(code2idx: dict, device: str = "cpu") -> dict:
     }
 
 # ---------------------------------------------
-# 替换原有的 get_headersandindex、get_subnote
+# Replacement for original get_headersandindex, get_subnote
 def get_headersandindex(input_str: str):
     """
-    在无任何标点、无换行的连续文本中，
-    按 headers_to_select 中的关键子串查找首次出现的位置，
-    并按其在原文中的顺序切分。
+    In continuous text without punctuation or newlines,
+    find first occurrence positions of key substrings in headers_to_select,
+    and split according to their order in original text.
     """
     low_text = input_str.lower()
     headers_to_select = [
@@ -93,17 +93,17 @@ def get_headersandindex(input_str: str):
         "discharge instructions",
         "followup instructions",
     ]
-    # 收集每个标题首次出现的位置
+    # Collect first occurrence positions of each header
     positions = []
     for hdr in headers_to_select:
         idx = low_text.find(hdr)
         if idx != -1:
             positions.append((idx, hdr))
-    # 按位置排序
+    # Sort by position
     positions.sort(key=lambda x: x[0])
     if not positions:
         return []
-    # 构造 (hdr, start, end) 区间列表
+    # Build (hdr, start, end) interval list
     intervals = []
     for i, (start, hdr) in enumerate(positions):
         end = positions[i+1][0] if i+1 < len(positions) else len(input_str)
@@ -112,25 +112,25 @@ def get_headersandindex(input_str: str):
 
 def get_subnote(input_str: str, headers_pos: list):
     """
-    将 headers_pos 指定的所有区间依次拼接，
-    只保留这些重要区块。
+    Concatenate all intervals specified by headers_pos,
+    keep only these important sections.
     """
     return "".join(input_str[start:end] for _, start, end in headers_pos)
 # ---------------------------------------------
 
 class TextLoader:
-    """文本 Tokenizer，不变"""
+    """Text Tokenizer, unchanged"""
     def __init__(self, pretrained_model_name: str = "Clinical-Longformer", max_length: int = 4096):
         self.tokenizer = AutoTokenizer.from_pretrained(pretrained_model_name)
         self.max_length = max_length
 
     def __call__(self, text: str) -> dict:
-        # 1. 清理掉特殊标记
+        # 1. Clean up special tokens
 
-        # 2. tokenize 判断长度
+        # 2. Tokenize and check length
         tokens = self.tokenizer.tokenize(text)
         if len(tokens) > self.max_length:
-            # 优先按标题提取
+            # Priority extraction by headers
             headers_pos = get_headersandindex(text)
             keep_headers = [
                 "chief complaint",
@@ -150,18 +150,18 @@ class TextLoader:
                 if len(tokens_sub) <= self.max_length:
                     raw_text = sub
                 else:
-                    # 提取后仍超长，fallback 到前后截断
+                    # Still too long after extraction, fallback to head+tail truncation
                     half = self.max_length // 2
                     head = tokens_sub[:half]; tail = tokens_sub[-half:]
                     raw_text = self.tokenizer.convert_tokens_to_string(head + tail)
             else:
-                # 没匹配到标题，直接前后截断
+                # No matching headers, directly truncate head+tail
                 half = self.max_length // 2
                 head = tokens[:half]; tail = tokens[-half:]
                 raw_text = self.tokenizer.convert_tokens_to_string(head + tail)
         else:
             raw_text = text
-        # 3. 最终固定长度 encoding
+        # 3. Final fixed length encoding
         encoding = self.tokenizer(
             raw_text,
             padding='max_length',
@@ -172,7 +172,7 @@ class TextLoader:
         return {k: v.squeeze(0) for k, v in encoding.items()}
 
 class LabelLoader:
-    """标签描述 Encoder，不变"""
+    """Label Description Encoder, unchanged"""
     def __init__(
         self,
         codes_file: str = "data/filtered_icd_codes_with_desc.feather",
@@ -197,8 +197,8 @@ class LabelLoader:
 
     def __call__(self) -> torch.Tensor:
         """
-        对所有标签描述做 tokenizer 编码并通过预训练模型计算 embedding，返回形状为
-        (num_labels, hidden_size) 的 Tensor。
+        Tokenize all label descriptions and compute embeddings through pretrained model,
+        return Tensor of shape (num_labels, hidden_size).
         """
         # 1. tokenize
         enc = self.tokenizer(
@@ -210,19 +210,19 @@ class LabelLoader:
         )
         input_ids = enc['input_ids']
         attention_mask = enc['attention_mask']
-        # 2. 通过模型计算 embedding
+        # 2. Compute embedding through model
         with torch.no_grad():
             outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
             if hasattr(outputs, 'pooler_output'):
                 label_embs = outputs.pooler_output    # [num_labels, hidden_size]
             else:
-                label_embs = outputs.last_hidden_state[:, 0]  # CLS token 表示
+                label_embs = outputs.last_hidden_state[:, 0]  # CLS token representation
         return label_embs
 
 
 def build_multihot_y(targets: list, code2idx: dict, num_labels: int) -> np.ndarray:
     """
-    将 List[List[code_str]] → dense multi-hot 矩阵 np.ndarray(shape=(n_samples, num_labels))
+    Convert List[List[code_str]] → dense multi-hot matrix np.ndarray(shape=(n_samples, num_labels))
     """
     y = np.zeros((len(targets), num_labels), dtype=np.float32)
     for i, codes in enumerate(targets):
@@ -232,12 +232,12 @@ def build_multihot_y(targets: list, code2idx: dict, num_labels: int) -> np.ndarr
                 idx = code2idx[code_str]
                 y[i, idx] = 1.0
             else:
-                print(f"警告: 代码 '{code_str}' 不在标签字典中，将被跳过")
+                print(f"Warning: code '{code_str}' not in label dictionary, will be skipped")
     return y
 
 
 class MultiHotLoader:
-    """多热标签 Loader，实现 __call__ 接口"""
+    """Multi-hot Label Loader, implements __call__ interface"""
     def __init__(self, code2idx: dict, num_labels: int):
         self.code2idx = code2idx
         self.num_labels = num_labels
@@ -249,15 +249,15 @@ class MultiHotLoader:
             if code_str in self.code2idx:
                 y[self.code2idx[code_str]] = 1.0
             else:
-                print(f"警告: 代码 '{code_str}' 不在标签字典中，将被跳过")
+                print(f"Warning: code '{code_str}' not in label dictionary, will be skipped")
         return y
 
 
 class ICDMultiLabelDataset(Dataset):
     """
-    普通多标签 Dataset，训练时返回 (x_dict, y_multihot),
-    验证/测试时只返回 x_dict。
-    x_dict 中包含:
+    Standard multi-label Dataset, returns (x_dict, y_multihot) during training,
+    only returns x_dict during validation/testing.
+    x_dict contains:
       - 'input_ids':  Tensor[seq_len]
       - 'attention_mask': Tensor[seq_len]
     y_multihot: np.ndarray[num_labels]
@@ -268,12 +268,12 @@ class ICDMultiLabelDataset(Dataset):
         targets = df['target'].tolist()
         self.texts = texts
         self.targets = targets
-        self.df = df  # 保存原始DataFrame以便访问split等列
+        self.df = df  # Save original DataFrame to access split and other columns
         self.text_loader = text_loader
         self.code2idx = label_loader.code2idx
         self.num_labels = label_loader.num_labels
         self.training = (mode == "train")
-        # 初始化多热标签 loader
+        # Initialize multi-hot label loader
         self.multihot_loader = MultiHotLoader(self.code2idx, self.num_labels)
 
     def __len__(self):
@@ -286,7 +286,7 @@ class ICDMultiLabelDataset(Dataset):
             'attention_mask': enc['attention_mask']
         }
         if self.training:
-            # 直接调用 MultiHotLoader 的 __call__ 接口
+            # Directly call MultiHotLoader's __call__ interface
             y = self.multihot_loader(self.targets[idx])
             return x, y
         return x
@@ -294,13 +294,13 @@ class ICDMultiLabelDataset(Dataset):
 
 class SynonymLabelLoader(LabelLoader):
     """
-    支持多类型术语的 LabelLoader：
-    - 从 synonyms_file 加载同义词字典（ICD code -> [同义词列表]）
-    - 为每个 code 准备 term_count 个术语
-    - 支持缩写开关 use_abbreviations：
-      * 开启时：第1个术语=原描述，第2个=缩写组合，第3个=通用表达组合，剩余=同义词
-      * 关闭时：第1个术语=原描述，剩余=同义词
-    - 支持 'random'/'max'/'mean' 三种同义词排序策略
+    LabelLoader supporting multiple types of terms:
+    - Load synonym dictionary from synonyms_file (ICD code -> [synonym list])
+    - Prepare term_count terms for each code
+    - Support abbreviation switch use_abbreviations:
+      * When enabled: 1st term=original description, 2nd=abbreviation combination, 3rd=common expression combination, rest=synonyms
+      * When disabled: 1st term=original description, rest=synonyms
+    - Support 'random'/'max'/'mean' three synonym sorting strategies
     """
     def __init__(
         self,
@@ -318,11 +318,11 @@ class SynonymLabelLoader(LabelLoader):
             pretrained_model_name=pretrained_model_name,
             max_length=max_length
         )
-        # 加载同义词表
+        # Load synonym dictionary
         with open(synonyms_file, 'r') as f:
             self.icd_syn = json.load(f)
         
-        # 加载缩写文件（可选）
+        # Load abbreviation file (optional)
         self.icd_abbr = {}
         if abbreviations_file and os.path.exists(abbreviations_file):
             with open(abbreviations_file, 'r', encoding='utf-8') as f:
@@ -335,17 +335,17 @@ class SynonymLabelLoader(LabelLoader):
 
     def __call__(self) -> torch.Tensor:
         """
-        对每个标签（含同义词）做 tokenizer 编码并通过模型计算 embedding，返回形状为
-        (num_labels * term_count, hidden_size) 的 Tensor。
+        Tokenize each label (including synonyms) and compute embedding through model,
+        return Tensor of shape (num_labels * term_count, hidden_size).
         """
         terms = []
-        # 对每个 code 构建术语列表
+        # Build term list for each code
         for code, desc in zip(self.codes, self.descriptions):
-            # 构建术语列表
-            code_terms = [desc]  # 原始描述始终在第一位
+            # Build term list
+            code_terms = [desc]  # Original description always first
             
             if self.use_abbreviations:
-                # 获取缩写和通用表达（如果存在）
+                # Get abbreviations and common expressions (if exist)
                 abbreviations = []
                 common_expressions = []
                 if code in self.icd_abbr:
@@ -353,20 +353,20 @@ class SynonymLabelLoader(LabelLoader):
                     abbreviations = abbr_data.get("abbreviations", [])
                     common_expressions = abbr_data.get("common_expressions", [])
                 
-                # 添加缩写组合作为第二个术语（如果有的话）
+                # Add abbreviation combination as second term (if available)
                 if abbreviations:
                     abbr_combined = " ".join(abbreviations)
                     code_terms.append(abbr_combined)
                 
-                # 添加通用表达组合作为第三个术语（如果有的话）
+                # Add common expression combination as third term (if available)
                 if common_expressions:
                     expr_combined = " ".join(common_expressions)
                     code_terms.append(expr_combined)
             
-            # 获取同义词填充剩余位置
+            # Get synonyms to fill remaining positions
             syns = self.icd_syn.get(code, [])
             
-            # 对同义词应用排序策略
+            # Apply sorting strategy to synonyms
             if self.sort_method == 'random':
                 random.shuffle(syns)
             elif self.sort_method == 'max':
@@ -374,24 +374,24 @@ class SynonymLabelLoader(LabelLoader):
             elif self.sort_method == 'mean':
                 syns = sorted(syns, key=lambda x: len(x))
             
-            # 用同义词填充剩余的 term_count 位置
+            # Fill remaining term_count positions with synonyms
             remaining_slots = self.term_count - len(code_terms)
             if remaining_slots > 0:
                 if len(syns) >= remaining_slots:
                     selected_syns = syns[:remaining_slots]
                 elif len(syns) > 0:
-                    # 循环补齐不足的同义词
+                    # Repeat to fill insufficient synonyms
                     repeat = int(remaining_slots / len(syns)) + 1
                     selected_syns = (syns * repeat)[:remaining_slots]
                 else:
-                    # 如果完全没有同义词，用原始描述填充
+                    # If no synonyms at all, fill with original description
                     selected_syns = [desc] * remaining_slots
                 
                 code_terms.extend(selected_syns)
             
             terms.extend(code_terms[:self.term_count])
 
-        # 对所有术语一起做 tokenizer
+        # Tokenize all terms together
         enc = self.tokenizer(
             terms,
             padding='max_length',
@@ -401,7 +401,7 @@ class SynonymLabelLoader(LabelLoader):
         )
         input_ids = enc['input_ids']         # [num_labels*term_count, max_length]
         attention_mask = enc['attention_mask']
-        # 通过模型计算 embedding
+        # Compute embedding through model
         with torch.no_grad():
             outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
             if hasattr(outputs, 'pooler_output'):
@@ -414,35 +414,35 @@ def build_adj_matrix(dataset, num_labels: int, term_count: int = 1,
                      mode: str = "ppmi", add_self_loop: bool = True,
                      topk: int = 20, device: str = "cpu") -> tuple[torch.LongTensor, torch.FloatTensor]:
     """
-    构建稀疏标签共现图 edge_index 和 edge_weight，适用于 GATConv。
+    Build sparse label co-occurrence graph edge_index and edge_weight, suitable for GATConv.
 
     Args:
-      dataset: 包含 df['split'], df['target'] 多热向量 (N, C)
-      num_labels: 标签总数 C
-      term_count: 同义词数 k
+      dataset: contains df['split'], df['target'] multi-hot vectors (N, C)
+      num_labels: total number of labels C
+      term_count: number of synonyms k
       mode: "binary"/"count"/"ppmi"
-      add_self_loop: 是否添加自环
-      topk: 每行保留 topk 边
+      add_self_loop: whether to add self-loops
+      topk: keep topk edges per row
       device: 'cpu' or 'cuda'
 
     Returns:
       edge_index: torch.LongTensor [2, E]
       edge_weight: torch.FloatTensor [E]
     """
-    # 1) 过滤生成样本
+    # 1) Filter generated samples
     df = dataset.df
     if 'split' in df.columns:
         df = df[df['split'] != 'generate']
-    # 2) 聚合标签矩阵：先把每行 code 列表转成长度为 C 的 multi-hot 向量
+    # 2) Aggregate label matrix: convert each row's code list to length C multi-hot vector
     targets = df['target'].tolist()  # List[List[code_str]]
-    # build_multihot_y 已在本文件中定义，返回 shape=(N, C) 的 np.ndarray
+    # build_multihot_y defined in this file, returns np.ndarray of shape=(N, C)
     labels_np = build_multihot_y(targets, dataset.code2idx, num_labels)  # (N, C)
     L = torch.from_numpy(labels_np).float().to(device)  # (N, C)
 
-    # 3) 计算共现矩阵
+    # 3) Compute co-occurrence matrix
     co_occ = L.t() @ L                                  # (C, C)
 
-    # 4) 构造初步权重矩阵
+    # 4) Build preliminary weight matrix
     if mode == 'binary':
         W = (co_occ > 0).float()
     elif mode == 'count':
@@ -453,19 +453,19 @@ def build_adj_matrix(dataset, num_labels: int, term_count: int = 1,
         p_i  = co_occ.diag() / N
         pmi  = torch.log(p_ij / (p_i.unsqueeze(1) * p_i.unsqueeze(0) + 1e-9) + 1e-9)
         W    = F.relu(pmi)
-        # 增加阈值筛选，只保留大于0.1的边
+        # Add threshold filtering, only keep edges greater than 0.1
         W = W.masked_fill(W < 0.1, 0.0)
     else:
         raise ValueError(f"Unknown mode: {mode}")
 
-    # 5) top-k 稀疏化
+    # 5) Top-k sparsification
     C = num_labels
     vals, idx = torch.topk(W, k=topk, dim=1)            # (C, topk)
     row = torch.arange(C, device=device).unsqueeze(1).repeat(1, topk).reshape(-1)
     col = idx.reshape(-1)
     weight = vals.reshape(-1)
 
-    # 6) 同义词扩展
+    # 6) Synonym expansion
     if term_count > 1:
         k = term_count
         offsets = torch.arange(k, device=device)
@@ -476,7 +476,7 @@ def build_adj_matrix(dataset, num_labels: int, term_count: int = 1,
     else:
         N = C
 
-    # 7) 添加自环
+    # 7) Add self-loops
     edge_index = torch.stack([row, col], dim=0)          # (2, E)
     edge_weight = weight                                # (E,)
     if add_self_loop:
@@ -487,13 +487,13 @@ def build_adj_matrix(dataset, num_labels: int, term_count: int = 1,
 
     return edge_index, edge_weight
 
-# ---------------- 新增：ICD9 层级推断 & 构图 ----------------
+# ---------------- ICD9 Hierarchy Inference & Graph Building (duplicate) ----------------
 def _infer_parent(code: str, code_set: set[str]) -> str | None:
     """
-    基于 ICD-9 代码字符串前缀推断最近父级：
-    - 逐步去掉末尾字符；若末尾是 '.' 则一并去掉；
-    - 一旦得到的前缀在 code_set 中，返回该前缀作为最近父级；
-    - 找不到则返回 None。
+    Infer nearest parent based on ICD-9 code string prefix:
+    - Progressively remove trailing characters; if trailing char is '.' remove it too;
+    - Once a prefix is found in code_set, return that prefix as nearest parent;
+    - Return None if not found.
     """
     cand = code.strip()
     while len(cand) > 1:
@@ -506,9 +506,9 @@ def _infer_parent(code: str, code_set: set[str]) -> str | None:
 
 def build_hierarchy_edges(code2idx: dict, direction: str = "parent_to_child") -> torch.LongTensor:
     """
-    构建 1-hop 层级边（代码级节点）：
-    - direction = 'parent_to_child' 或 'child_to_parent'
-    - 仅返回 edge_index（权重默认为 1，下游可选用）
+    Build 1-hop hierarchy edges (code-level nodes):
+    - direction = 'parent_to_child' or 'child_to_parent'
+    - Only returns edge_index (weight defaults to 1, optional for downstream use)
     """
     codes = list(code2idx.keys())
     code_set = set(codes)
@@ -529,7 +529,7 @@ def build_hierarchy_edges(code2idx: dict, direction: str = "parent_to_child") ->
 
 def build_hierarchy_adjs(code2idx: dict, device: str = "cpu") -> dict:
     """
-    返回用于消息传递的双向邻接（不含自环；残差在GNN内部做）：
+    Return bidirectional adjacency for message passing (no self-loops; residual done inside GNN):
       - 'up':   child→parent
       - 'down': parent→child
     """

@@ -16,7 +16,7 @@ from transformers import (
 )
 from torch.optim import AdamW
 from src.data_loader import TextLoader, LabelLoader, ICDMultiLabelDataset, SynonymLabelLoader
-# 修改导入：添加新的BERT chunk模型
+# Modify import: add new BERT chunk model
 from src.model import ClinicalLongformerLabelAttention, ClinicalBERTChunkAttention, ClinicalBERTChunkAttentionV2
 from src.metric import MetricCollection, Precision, Recall, F1Score, MeanAveragePrecision, AUC, Precision_K, LossMetric
 from src.trainer import Trainer
@@ -29,14 +29,14 @@ from src.data_loader import build_hierarchy_adjs, build_hierarchy_edges
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 def setup_ddp(rank, world_size):
-    """初始化DDP环境"""
+    """Initialize DDP environment"""
     os.environ['MASTER_ADDR'] = 'localhost'
     os.environ['MASTER_PORT'] = '12355'
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
     torch.cuda.set_device(rank)
 
 def cleanup_ddp():
-    """清理DDP环境"""
+    """Clean up DDP environment"""
     dist.destroy_process_group()
 
 def parse_args():
@@ -70,61 +70,61 @@ def parse_args():
     parser.add_argument("--resume_checkpoint", type=str, default=None, help="Path to checkpoint for resuming training")
     parser.add_argument("--scheduler_type", type=str, default="cosine", choices=["linear", "cosine", "cosine_restart", "polynomial", "constant"], help="Learning-rate scheduler strategy")
     
-    # 添加早停相关参数
+    # Add early stopping parameters
     parser.add_argument("--early_stopping_patience", type=int, default=5, help="Number of epochs to wait before early stopping if no improvement")
     parser.add_argument("--early_stopping_min_delta", type=float, default=0.0001, help="Minimum change required to qualify as an improvement")
     parser.add_argument("--early_stopping", action="store_true", default=False, help="Whether to use early stopping")
     
     parser.add_argument("--eval_codes_file", type=str, default=None,
-                        help="txt/json 列表文件；若给定则只在这些 code 上计算指标")
+                        help="txt/json list file; if provided, metrics are calculated only on these codes")
     
-    # ---- 对比学习相关参数 ----
+    # ---- Contrastive learning parameters ----
     parser.add_argument("--use_contrastive", action="store_true", default=False,
-                        help="是否启用对比学习")
+                        help="Whether to enable contrastive learning")
     parser.add_argument("--contrastive_loss_weight", type=float, default=0.1,
-                        help="对比学习的损失权重")
+                        help="Weight for contrastive loss")
     parser.add_argument("--contrastive_temperature", type=float, default=0.1,
-                        help="对比学习的温度 τ (for LabelWiseContrastiveLoss)")
+                        help="Temperature tau for contrastive learning (for LabelWiseContrastiveLoss)")
     parser.add_argument("--use_contrastive_positive_only", action="store_true", default=False,
-                        help="是否启用仅正样本对比学习（Positive-Only）")
+                        help="Whether to enable positive-only contrastive learning")
 
-    # ---- GNN和共现/层级图相关参数 ----
+    # ---- GNN and co-occurrence/hierarchy graph parameters ----
     parser.add_argument("--use_gnn", action="store_true", default=False,
-                        help="是否启用GNN更新标签嵌入")
+                        help="Whether to enable GNN to update label embeddings")
     parser.add_argument("--adj_matrix_mode", type=str, default="ppmi", 
                         choices=["binary", "count", "ppmi", "hierarchy"],
-                        help="邻接矩阵构建模式")
+                        help="Adjacency matrix construction mode")
     parser.add_argument("--adj_matrix_topk", type=int, default=20,
-                        help="邻接矩阵每行保留的边数 topk（仅共现图生效）")
+                        help="Top-k edges to keep per row for adjacency matrix (only for co-occurrence graph)")
     parser.add_argument("--adj_matrix_self_loop", action="store_true", default=True,
-                        help="是否在邻接矩阵中添加自环（仅共现图生效）")
+                        help="Whether to add self-loops to adjacency matrix (only for co-occurrence graph)")
     parser.add_argument("--adj_matrix_device", type=str, default="cpu",
-                        help="构建邻接矩阵时使用的设备")
+                        help="Device used for building adjacency matrix")
     
-    # ---- 层级一致性损失 ----
+    # ---- Hierarchy consistency loss ----
     parser.add_argument("--use_hierarchy_loss", action="store_true", default=False,
-                        help="是否启用层级一致性损失（parent→child）")
+                        help="Whether to enable hierarchy consistency loss (parent->child)")
     parser.add_argument("--hierarchy_loss_weight", type=float, default=0.05,
-                        help="层级一致性损失权重")
+                        help="Weight for hierarchy consistency loss")
     parser.add_argument("--hierarchy_margin", type=float, default=0.0,
-                        help="层级一致性 hinge margin")
+                        help="Hinge margin for hierarchy consistency")
     
     parser.add_argument("--use_focal_loss", action="store_true", default=False,
-                        help="是否使用Focal Loss")
-    parser.add_argument("--gamma", type=float, default=2.0, help="Focal Loss 的 gamma 参数")
-    parser.add_argument("--alpha", type=float, default=0.25, help="Focal Loss 的 alpha 参数")
+                        help="Whether to use Focal Loss")
+    parser.add_argument("--gamma", type=float, default=2.0, help="Gamma parameter for Focal Loss")
+    parser.add_argument("--alpha", type=float, default=0.25, help="Alpha parameter for Focal Loss")
     
-    # ---- 新增：BERT chunk 相关参数 ----
+    # ---- New: BERT chunk related parameters ----
     parser.add_argument("--model_type", type=str, default="longformer", 
                         choices=["longformer", "bert_chunk", "bert_chunk_v2"],
-                        help="模型类型选择")
+                        help="Model type selection")
     parser.add_argument("--chunk_size", type=int, default=512,
-                        help="BERT chunk模型的chunk大小")
+                        help="Chunk size for BERT chunk model")
     parser.add_argument("--overlap", type=int, default=32,
-                        help="BERT chunk模型的重叠大小（仅对 bert_chunk_v2 生效）")
+                        help="Overlap size for BERT chunk model (only for bert_chunk_v2)")
     parser.add_argument("--chunk_aggregation", type=str, default="max",
                         choices=["mean", "max", "sum", "weighted"],
-                        help="Chunk聚合方式 (仅对bert_chunk_v2有效)")
+                        help="Chunk aggregation method (only for bert_chunk_v2)")
     
     return parser.parse_args()
 
@@ -159,14 +159,14 @@ def build_scheduler(
         raise ValueError(f"Unsupported scheduler type: {scheduler_type}")
 
 def main_worker(rank, args):
-    """DDP训练的工作进程"""
+    """DDP training worker process"""
     if args.use_ddp:
         setup_ddp(rank, args.world_size)
         device = torch.device(f"cuda:{rank}")
     else:
         device = torch.device(args.device)
     
-    # W&B初始化（只在rank 0进行）
+    # W&B initialization (only on rank 0)
     if args.use_wandb and (not args.use_ddp or rank == 0):
         now = datetime.now().strftime("%m-%d_%H-%M")
         wandb.init(project="Attentionicd", name=f"Attentionicd_{now}")
@@ -178,7 +178,7 @@ def main_worker(rank, args):
     print(f"Using device: {device}")
     print(f"Model type: {args.model_type}")
 
-    # 数据加载和模型初始化
+    # Data loading and model initialization
     print("Loading text tokenizer...")
     text_loader = TextLoader(pretrained_model_name=args.pretrained_model_name, max_length=args.max_length)
     print("Loading label tokenizer and model...")
@@ -191,7 +191,7 @@ def main_worker(rank, args):
     val_dataset = ICDMultiLabelDataset(data_file=args.val_file, text_loader=text_loader, label_loader=label_loader)
     test_dataset = ICDMultiLabelDataset(data_file=args.test_file, text_loader=text_loader, label_loader=label_loader)
     
-    # 创建分布式采样器
+    # Create distributed samplers
     if args.use_ddp:
         train_sampler = DistributedSampler(train_dataset, num_replicas=args.world_size, rank=rank)
         val_sampler = DistributedSampler(val_dataset, num_replicas=args.world_size, rank=rank, shuffle=False)
@@ -228,18 +228,18 @@ def main_worker(rank, args):
     )
     print("Initializing model...")
     
-    # 构建邻接矩阵（如果启用GNN）
+    # Build adjacency matrix (if GNN enabled)
     adj_matrix = None
     hierarchy_edges = None
     if args.use_gnn:
         print("Building adjacency matrix for GNN...")
         if args.adj_matrix_mode == "hierarchy":
-            # 层级图：双向邻接用于消息传递；不复制同义词节点
+            # Hierarchy graph: bidirectional adjacency for message passing; do not copy synonym nodes
             adj_matrix = build_hierarchy_adjs(
                 code2idx=label_loader.code2idx,
                 device=args.adj_matrix_device
             )
-            # 有向 parent→child 边：用于层级一致性损失
+            # Directed parent->child edges: for hierarchy consistency loss
             hierarchy_edges = build_hierarchy_edges(
                 code2idx=label_loader.code2idx,
                 direction="parent_to_child"
@@ -259,7 +259,7 @@ def main_worker(rank, args):
             adj_matrix = (edge_index, edge_weight)
             print(f"Adjacency matrix shape: {edge_index.shape}, {edge_weight.shape}")
     
-    # 根据模型类型创建不同的模型
+    # Create different models based on model type
     if args.model_type == "longformer":
         print("Using ClinicalLongformerLabelAttention model...")
         model = ClinicalLongformerLabelAttention(
@@ -296,11 +296,11 @@ def main_worker(rank, args):
     
     model.to(device)
     
-    # 包装为DDP模型
+    # Wrap as DDP model
     if args.use_ddp:
         model = DDP(model, device_ids=[rank], output_device=rank, find_unused_parameters=True)
     
-    # W&B监控（只在rank 0）
+    # W&B watch (only on rank 0)
     if args.use_wandb and (not args.use_ddp or rank == 0):
         wandb.watch(model)
 
@@ -334,18 +334,18 @@ def main_worker(rank, args):
         hierarchy_criterion = HierarchyConsistencyLoss(margin=args.hierarchy_margin)
     print("Initializing metrics...")
     
-    # ---------- 生成要评估的 code_indices ----------
-    if args.eval_codes_file:                 # 开关打开
-        # 支持 .txt 一行一个 code，也支持 json list
+    # ---------- Generate code_indices to evaluate ----------
+    if args.eval_codes_file:                 # Switch on
+        # Support .txt one code per line, also json list
         if args.eval_codes_file.endswith(".json"):
             import json, pathlib
             subset_codes = json.load(open(args.eval_codes_file))
         else:
             subset_codes = [l.strip() for l in open(args.eval_codes_file) if l.strip()]
-    else:                                    # 默认：把训练集实际出现过的 code 拿出来
+    else:                                    # Default: extract codes that actually appeared in training set
         subset_codes = list({str(c) for t in train_dataset.targets for c in t})
 
-    if subset_codes:                         # 显式传给 MetricCollection
+    if subset_codes:                         # Explicitly pass to MetricCollection
         code_indices = torch.tensor(
             [label_loader.code2idx[c] for c in subset_codes if c in label_loader.code2idx],
             dtype=torch.long
@@ -354,7 +354,7 @@ def main_worker(rank, args):
         code_indices = None
 
     metrics = {
-        "train": MetricCollection([LossMetric()]),          # 训练阶段通常不需要裁剪
+        "train": MetricCollection([LossMetric()]),          # No cropping usually needed for training phase
         "val":   MetricCollection([
                     Precision(number_of_classes=label_loader.num_labels, average="macro"),
                     Precision(number_of_classes=label_loader.num_labels, average="micro"),
@@ -368,7 +368,7 @@ def main_worker(rank, args):
                     Precision_K(k=5),
                     MeanAveragePrecision(),
                     LossMetric()
-                ], code_indices),     # 只评估这 50 个 code
+                ], code_indices),     # Only evaluate these codes
         "test":  MetricCollection([
                     Precision(number_of_classes=label_loader.num_labels, average="macro"),
                     Precision(number_of_classes=label_loader.num_labels, average="micro"),
@@ -408,7 +408,7 @@ def main_worker(rank, args):
         best_metric_name=args.best_metric_name,
         use_amp=args.use_amp,
         use_wandb=args.use_wandb and (not args.use_ddp or rank == 0),
-        save_artifacts=False,  # 禁用wandb artifacts保存
+        save_artifacts=False,  # Disable wandb artifacts saving
         use_ddp=args.use_ddp,
         rank=rank if args.use_ddp else 0,
         world_size=args.world_size if args.use_ddp else 1,
@@ -431,7 +431,7 @@ def main_worker(rank, args):
 def main():
     args = parse_args()
     if not args.output_dir:
-        # 为输出目录添加小时级时间戳，格式：YYYYMMDD_HH
+        # Add hourly timestamp to output directory, format: YYYYMMDD_HH
         timestamp = datetime.now().strftime("%Y%m%d_%H%M")
         args.output_dir = os.path.join("checkpoints", timestamp)
 

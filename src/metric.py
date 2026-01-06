@@ -213,40 +213,40 @@ class MetricCollection:
 
     def sync_counters(self):
         """
-        对所有 batch_update=True 的 Metric，在所有进程间 all_reduce
-        把它们内部的计数器（torch.Tensor 或 Python int/float）求和为全局值。
+        For all Metrics with batch_update=True, all_reduce across all processes
+        to sum their internal counters (torch.Tensor or Python int/float) to global values.
         """
         for metric in self.metrics:
             if not metric.batch_update:
                 continue
             if isinstance(metric, RunningMeanMetric):
-           # 本地加权和 & 权重，保持为 Tensor
+           # Local weighted sum & weight, keep as Tensor
                 local_sum    = metric._values.detach()   * metric.weight_by.detach()
                 local_weight = metric.weight_by.detach()
 
-                # all_reduce 直接在原 dtype、原 device 上做累加
+                # all_reduce directly on original dtype, original device
                 dist.all_reduce(local_sum,    op=ReduceOp.SUM)
                 dist.all_reduce(local_weight, op=ReduceOp.SUM)
 
-                # 重算全局平均，仍然是 Tensor
+                # Recompute global average, still as Tensor
                 metric._values  = (local_sum / local_weight).to(metric.device)
                 metric.weight_by = local_weight.to(metric.device)
                 continue
             for attr, val in metric.__dict__.items():
-                # 仅同步以下"数值计数器"：
-                # 1) Tensor 型，直接 all_reduce
-                # 2) int/float 型，但字段名必须以 "_num" 开头（避免同步 _k 等参数）
+                # Only sync the following "numeric counters":
+                # 1) Tensor type, directly all_reduce
+                # 2) int/float type, but field name must start with "_num" (avoid syncing _k and other parameters)
                 if not attr.startswith("_"):
                     continue
                 if isinstance(val, (int, float)) and not attr.startswith("_num"):
                     continue
 
-                # Tensor 型计数字段
+                # Tensor type counter field
                 if isinstance(val, torch.Tensor):
                     t = val.detach().to(metric.device)
                     dist.all_reduce(t, op=dist.ReduceOp.SUM)
                     setattr(metric, attr, t)
-                # Python int/float 型计数字段
+                # Python int/float type counter field
                 elif isinstance(val, (int, float)):
                     t = torch.tensor([val], device=metric.device, dtype=torch.float64)
                     dist.all_reduce(t, op=dist.ReduceOp.SUM)

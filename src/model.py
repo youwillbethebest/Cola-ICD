@@ -9,13 +9,13 @@ import torch.nn.functional as F
 
 class ClinicalLongformerLabelAttention(nn.Module):
     """
-    Clinical-Longformer 主干 + 标签注意力 多标签分类模型。
+    Clinical-Longformer backbone + Label Attention multi-label classification model.
     Args:
-      longformer_path: 本地临床 Longformer 模型路径
-      codes_file: ICD 代码及描述文件路径
-      label_model_name: 用于加载标签描述的预训练模型名称，默认 Bio_ClinicalBERT
-      use_gnn: 是否使用GNN更新标签嵌入
-      adj_matrix: 标签共现邻接矩阵
+      longformer_path: Local Clinical Longformer model path
+      codes_file: ICD code and description file path
+      label_model_name: Pretrained model name for loading label descriptions, default Bio_ClinicalBERT
+      use_gnn: Whether to use GNN to update label embeddings
+      adj_matrix: Label co-occurrence adjacency matrix
     """
     def __init__(self,
                  longformer_path: str,
@@ -26,13 +26,13 @@ class ClinicalLongformerLabelAttention(nn.Module):
                  use_gnn: bool = False,
                  adj_matrix: Optional[torch.Tensor] = None):
         super().__init__()
-        # 文本编码器
+        # Text encoder
         self.model = AutoModel.from_pretrained(longformer_path,add_pooling_layer=False)
         hidden_size = self.model.config.hidden_size
 
-        # ---------------- 标签加载 ----------------
-        if label_loader is None:          # 若外部未传入，则内部创建（保持兼容）
-            assert codes_file is not None, "当未提供 label_loader 时，必须指定 codes_file"
+        # ---------------- Label loading ----------------
+        if label_loader is None:          # If not provided externally, create internally (maintain compatibility)
+            assert codes_file is not None, "codes_file must be specified when label_loader is not provided"
             label_loader = SynonymLabelLoader(
                 codes_file=codes_file,
                 pretrained_model_name=label_model_name,
@@ -40,16 +40,16 @@ class ClinicalLongformerLabelAttention(nn.Module):
             )
 
         self.num_labels = label_loader.num_labels
-        label_embs = label_loader()       # 预计算标签嵌入
+        label_embs = label_loader()       # Pre-compute label embeddings
         #self.register_buffer("label_embs", label_embs)
         self.label_embs = nn.Parameter(label_embs)
-        self.term_counts = term_counts  # 保存 term_counts
-        # ---------------- GNN 模块 (可选) ----------------
+        self.term_counts = term_counts  # Save term_counts
+        # ---------------- GNN module (optional) ----------------
         self.use_gnn = use_gnn
         self.hier_mode = False
         if self.use_gnn:
-            assert adj_matrix is not None, "当 use_gnn=True 时，必须提供 adj_matrix。"
-            # 支持两类：共现图 (edge_index, edge_weight) 或 层级图 {'up':(...), 'down':(...)}
+            assert adj_matrix is not None, "adj_matrix must be provided when use_gnn=True."
+            # Support two types: co-occurrence graph (edge_index, edge_weight) or hierarchy graph {'up':(...), 'down':(...)}
             if isinstance(adj_matrix, dict) and "up" in adj_matrix and "down" in adj_matrix:
                 self.hier_mode = True
                 up_ei, up_w = adj_matrix["up"]
@@ -61,18 +61,18 @@ class ClinicalLongformerLabelAttention(nn.Module):
                 self.gnn_hier = HierLabelGNN(hidden_size, hidden_size // 2, hidden_size)
             else:
                 edge_index, edge_weight = adj_matrix
-                # 注册为 buffer
+                # Register as buffer
                 self.register_buffer("edge_index", edge_index)
                 self.register_buffer("edge_weight", edge_weight)
-                # GNN 模块内部已是两层 GCNConv
+                # GNN module internally has two GCNConv layers
                 self.gnn = LabelGNN(hidden_size, hidden_size // 2, hidden_size)
             
-            # 可以堆叠多层GAT
-            # 或者只用一层
+            # Can stack multiple GAT layers
+            # Or use just one layer
             # self.gat_layer = GraphAttentionLayer(hidden_size, hidden_size, dropout=0.2, alpha=0.2, concat=False)
 
 
-        # 标签感知注意力
+        # Label-aware attention
         self.attention = LabelAttention(
             attention_head=term_counts,
             rep_droupout_num=0.2,
@@ -82,7 +82,7 @@ class ClinicalLongformerLabelAttention(nn.Module):
             num_labels=self.num_labels,
             est_cls=1
         )
-        # 投影头
+        # Projection head
         projection_dim = 256
         self.shared_head = nn.Sequential(
             nn.Linear(hidden_size, hidden_size),
@@ -94,18 +94,18 @@ class ClinicalLongformerLabelAttention(nn.Module):
 
     def get_label_embeddings(self):
         """
-        获取标签嵌入，如果启用GNN则使用图注意力网络更新
+        Get label embeddings, use graph attention network for update if GNN is enabled
         
         Returns:
-            label_embs_for_attention: (C*k, H) - 用于注意力机制的标签嵌入
-            label_proto_for_contrastive: (C, H) - 用于对比学习的标签原型
+            label_embs_for_attention: (C*k, H) - Label embeddings for attention mechanism
+            label_proto_for_contrastive: (C, H) - Label prototypes for contrastive learning
         """
-        # 原始标签嵌入已经是 (C*k, H) 的形式
+        # Original label embeddings are already in (C*k, H) form
         raw_embs = self.label_embs  # (C*k, H)
         
         if self.use_gnn:
             if self.hier_mode:
-                # 代码级图：先聚合术语为代码级，再图更新，再广播回术语位
+                # Code-level graph: first aggregate terms to code-level, then graph update, then broadcast back to term positions
                 code_pool = raw_embs.view(self.num_labels, self.term_counts, -1).max(dim=1)[0]  # (C, H)
                 code_updated = self.gnn_hier(
                     code_pool,
@@ -115,7 +115,7 @@ class ClinicalLongformerLabelAttention(nn.Module):
                 label_embs_for_attention = code_updated.repeat_interleave(self.term_counts, dim=0)  # (C*k, H)
                 label_proto_for_contrastive = code_updated  # (C, H)
             else:
-                # 调用 GNN 时传入稀疏表示（共现图）
+                # Pass sparse representation (co-occurrence graph) when calling GNN
                 updated_embs = self.gnn(raw_embs, self.edge_index, self.edge_weight)  # (C*k, H)
                 label_embs_for_attention = updated_embs  # (C*k, H)
                 label_proto_for_contrastive = updated_embs.view(
@@ -123,10 +123,10 @@ class ClinicalLongformerLabelAttention(nn.Module):
                 ).max(dim=1)[0]  # (C, H)
             
         else:
-            # 如果不使用GNN，直接使用原始嵌入
+            # If not using GNN, directly use original embeddings
             label_embs_for_attention = raw_embs  # (C*k, H)
             
-            # 对比学习时，取每个标签的 k 个同义词进行 max pooling
+            # For contrastive learning, take max pooling over k synonyms for each label
             label_proto_for_contrastive = raw_embs.view(
                 self.num_labels, self.term_counts, -1
             ).max(dim=1)[0]  # (C, H)
@@ -136,7 +136,7 @@ class ClinicalLongformerLabelAttention(nn.Module):
     def forward(self,
                 input_ids: torch.Tensor,
                 attention_mask: torch.Tensor) -> dict:
-        # 文本编码
+        # Text encoding
         outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
         text_hidden = outputs.last_hidden_state  # (N, L, H)
         
@@ -146,10 +146,10 @@ class ClinicalLongformerLabelAttention(nn.Module):
         # sum_mask = torch.clamp(attention_mask.sum(dim=1, keepdim=True), min=1e-9)
         # text_feat = sum_embeddings / sum_mask
         label_embs_for_attention, label_proto_for_contrastive = self.get_label_embeddings()
-        # 标签注意力生成 logits
+        # Label attention generates logits
         logits, per_label_text_feat = self.attention(text_hidden, attention_mask, label_embs_for_attention)
 
-        # 应用投影头，为对比学习生成隔离的特征
+        # Apply projection head to generate isolated features for contrastive learning
         contrastive_text_feat = self.text_projection_head(per_label_text_feat)
         contrastive_label_proto = self.label_projection_head(label_proto_for_contrastive)
 
@@ -174,23 +174,23 @@ class ClinicalLongformerLabelAttentionV2(nn.Module):
 
 class ClinicalBERTChunkAttention(nn.Module):
     """
-    基于BERT的文本分块注意力模型
+    BERT-based text chunking attention model
     
-    处理流程：
-    1. 文本分块：(batch_size, total_tokens) → (batch_size, num_chunks, chunk_size)
-    2. BERT独立编码：每个chunk通过BERT → (batch_size, num_chunks, chunk_size, hidden_size)
-    3. 重新组织：拼接所有chunk的embedding → (batch_size, total_tokens, hidden_size)
-    4. 标签注意力：在拼接后的完整序列上进行注意力计算
+    Processing flow:
+    1. Text chunking: (batch_size, total_tokens) → (batch_size, num_chunks, chunk_size)
+    2. BERT independent encoding: each chunk through BERT → (batch_size, num_chunks, chunk_size, hidden_size)
+    3. Reorganize: concatenate embeddings from all chunks → (batch_size, total_tokens, hidden_size)
+    4. Label attention: perform attention computation on the concatenated complete sequence
     
     Args:
-        bert_model_path: BERT模型路径
-        chunk_size: 每个chunk的token数量，默认128
-        codes_file: ICD代码及描述文件路径
-        label_model_name: 标签描述的预训练模型名称
-        term_counts: 每个标签的同义词数量
-        label_loader: 外部传入的标签加载器
-        use_gnn: 是否使用GNN更新标签嵌入
-        adj_matrix: 标签共现邻接矩阵
+        bert_model_path: BERT model path
+        chunk_size: Number of tokens per chunk, default 128
+        codes_file: ICD code and description file path
+        label_model_name: Pretrained model name for label descriptions
+        term_counts: Number of synonyms per label
+        label_loader: Externally provided label loader
+        use_gnn: Whether to use GNN to update label embeddings
+        adj_matrix: Label co-occurrence adjacency matrix
     """
     
     def __init__(self,
@@ -204,14 +204,14 @@ class ClinicalBERTChunkAttention(nn.Module):
                  adj_matrix: Optional[torch.Tensor] = None):
         super().__init__()
         
-        # BERT编码器
+        # BERT encoder
         self.bert_model = AutoModel.from_pretrained(bert_model_path,add_pooling_layer=False)
         self.chunk_size = chunk_size
         hidden_size = self.bert_model.config.hidden_size
         
-        # ---------------- 标签加载 ----------------
+        # ---------------- Label loading ----------------
         if label_loader is None:
-            assert codes_file is not None, "当未提供 label_loader 时，必须指定 codes_file"
+            assert codes_file is not None, "codes_file must be specified when label_loader is not provided"
             label_loader = SynonymLabelLoader(
                 codes_file=codes_file,
                 pretrained_model_name=label_model_name,
@@ -223,11 +223,11 @@ class ClinicalBERTChunkAttention(nn.Module):
         self.label_embs = nn.Parameter(label_embs)
         self.term_counts = term_counts
         
-        # ---------------- GNN 模块 (可选) ----------------
+        # ---------------- GNN module (optional) ----------------
         self.use_gnn = use_gnn
         self.hier_mode = False
         if self.use_gnn:
-            assert adj_matrix is not None, "当 use_gnn=True 时，必须提供 adj_matrix。"
+            assert adj_matrix is not None, "adj_matrix must be provided when use_gnn=True."
             if isinstance(adj_matrix, dict) and "up" in adj_matrix and "down" in adj_matrix:
                 self.hier_mode = True
                 up_ei, up_w = adj_matrix["up"]
@@ -243,7 +243,7 @@ class ClinicalBERTChunkAttention(nn.Module):
                 self.register_buffer("edge_weight", edge_weight)
                 self.gnn = LabelGNN(hidden_size, hidden_size // 2, hidden_size)
 
-        # 标签感知注意力
+        # Label-aware attention
         self.attention = LabelAttention(
             attention_head=term_counts,
             rep_droupout_num=0.2,
@@ -254,7 +254,7 @@ class ClinicalBERTChunkAttention(nn.Module):
             est_cls=1
         )
         
-        # 投影头
+        # Projection head
         projection_dim = 256
         self.shared_head = nn.Sequential(
             nn.Linear(hidden_size, hidden_size),
@@ -266,7 +266,7 @@ class ClinicalBERTChunkAttention(nn.Module):
 
     def chunk_and_encode(self, input_ids: torch.Tensor, attention_mask: torch.Tensor):
         """
-        文本分块并进行BERT编码
+        Chunk text and perform BERT encoding
         
         Args:
             input_ids: (batch_size, total_tokens)
@@ -278,28 +278,28 @@ class ClinicalBERTChunkAttention(nn.Module):
         """
         batch_size, total_tokens = input_ids.shape
         
-        # 计算需要的chunk数量
+        # Calculate number of chunks needed
         num_chunks = (total_tokens + self.chunk_size - 1) // self.chunk_size
         
-        # 如果总长度不能被chunk_size整除，需要padding
+        # If total length is not divisible by chunk_size, need padding
         padded_length = num_chunks * self.chunk_size
         if padded_length > total_tokens:
-            # 使用pad_token_id进行padding，通常是0
+            # Use pad_token_id for padding, usually 0
             pad_length = padded_length - total_tokens
             input_ids = F.pad(input_ids, (0, pad_length), value=0)
             attention_mask = F.pad(attention_mask, (0, pad_length), value=0)
         
-        # 第一步：分块重塑
+        # Step 1: Chunk and reshape
         # (batch_size, total_tokens) → (batch_size, num_chunks, chunk_size)
         chunked_input_ids = input_ids.view(batch_size, num_chunks, self.chunk_size)
         chunked_attention_mask = attention_mask.view(batch_size, num_chunks, self.chunk_size)
         
-        # 第二步：BERT独立编码
-        # 展平为 (batch_size * num_chunks, chunk_size)
+        # Step 2: BERT independent encoding
+        # Flatten to (batch_size * num_chunks, chunk_size)
         flat_input_ids = chunked_input_ids.view(-1, self.chunk_size)
         flat_attention_mask = chunked_attention_mask.view(-1, self.chunk_size)
         
-        # 每个chunk独立通过BERT编码
+        # Each chunk independently encoded through BERT
         with torch.cuda.device(flat_input_ids.device):
             chunk_outputs = self.bert_model(
                 input_ids=flat_input_ids,
@@ -307,16 +307,16 @@ class ClinicalBERTChunkAttention(nn.Module):
             )
         chunk_embeddings = chunk_outputs.last_hidden_state  # (batch_size * num_chunks, chunk_size, hidden_size)
         
-        # 第三步：重新组织embedding
-        # 重塑为 (batch_size, num_chunks, chunk_size, hidden_size)
+        # Step 3: Reorganize embeddings
+        # Reshape to (batch_size, num_chunks, chunk_size, hidden_size)
         chunk_embeddings = chunk_embeddings.view(batch_size, num_chunks, self.chunk_size, -1)
-        # 拼接所有chunk: (batch_size, num_chunks * chunk_size, hidden_size)
+        # Concatenate all chunks: (batch_size, num_chunks * chunk_size, hidden_size)
         concatenated_embeddings = chunk_embeddings.view(batch_size, -1, chunk_embeddings.size(-1))
         
-        # 同样处理attention_mask
+        # Similarly process attention_mask
         final_attention_mask = chunked_attention_mask.view(batch_size, -1)
         
-        # 截取到原始长度
+        # Truncate to original length
         if padded_length > total_tokens:
             concatenated_embeddings = concatenated_embeddings[:, :total_tokens, :]
             final_attention_mask = final_attention_mask[:, :total_tokens]
@@ -324,7 +324,7 @@ class ClinicalBERTChunkAttention(nn.Module):
         return concatenated_embeddings, final_attention_mask
 
     def get_label_embeddings(self):
-        """获取标签嵌入，与原模型保持一致"""
+        """Get label embeddings, consistent with original model"""
         raw_embs = self.label_embs
         
         if self.use_gnn:
@@ -355,33 +355,33 @@ class ClinicalBERTChunkAttention(nn.Module):
                 input_ids: torch.Tensor,
                 attention_mask: torch.Tensor) -> dict:
         """
-        前向传播
+        Forward pass
         
         Args:
-            input_ids: (batch_size, total_tokens) 例如 (1, 2000)
+            input_ids: (batch_size, total_tokens) e.g. (1, 2000)
             attention_mask: (batch_size, total_tokens)
             
         Returns:
-            logits: 分类logits
-            contrastive_text_feat: 用于对比学习的文本特征
-            contrastive_label_proto: 用于对比学习的标签原型
+            logits: Classification logits
+            contrastive_text_feat: Text features for contrastive learning
+            contrastive_label_proto: Label prototypes for contrastive learning
         """
-        # 文本分块编码
+        # Text chunking and encoding
         text_hidden, processed_attention_mask = self.chunk_and_encode(input_ids, attention_mask)
         # text_hidden: (batch_size, total_tokens, hidden_size)
         # processed_attention_mask: (batch_size, total_tokens)
         
-        # 获取标签嵌入
+        # Get label embeddings
         label_embs_for_attention, label_proto_for_contrastive = self.get_label_embeddings()
         
-        # 标签注意力生成logits
+        # Label attention generates logits
         logits, per_label_text_feat = self.attention(
             text_hidden, 
             processed_attention_mask, 
             label_embs_for_attention
         )
         
-        # 应用投影头，为对比学习生成隔离的特征
+        # Apply projection head to generate isolated features for contrastive learning
         contrastive_text_feat = self.text_projection_head(per_label_text_feat)
         contrastive_label_proto = self.label_projection_head(label_proto_for_contrastive)
 
@@ -390,15 +390,15 @@ class ClinicalBERTChunkAttention(nn.Module):
 
 class ClinicalBERTChunkAttentionV2(nn.Module):
     """
-    基于BERT的文本分块注意力模型 - 版本2
+    BERT-based text chunking attention model - Version 2
     
-    处理流程（先注意力再拼接）：
-    1. 文本分块：(batch_size, total_tokens) → (batch_size, num_chunks, chunk_size)
-    2. BERT独立编码：每个chunk通过BERT → (batch_size, num_chunks, chunk_size, hidden_size)
-    3. 每个chunk内部进行标签注意力
-    4. 拼接各chunk的注意力结果
+    Processing flow (attention first, then concatenate):
+    1. Text chunking: (batch_size, total_tokens) → (batch_size, num_chunks, chunk_size)
+    2. BERT independent encoding: each chunk through BERT → (batch_size, num_chunks, chunk_size, hidden_size)
+    3. Label attention within each chunk
+    4. Concatenate attention results from all chunks
     
-    这个版本在每个chunk内部独立进行注意力计算，可能更适合长文本处理
+    This version performs attention computation independently within each chunk, may be more suitable for long text processing
     """
     
     def __init__(self,
@@ -411,22 +411,22 @@ class ClinicalBERTChunkAttentionV2(nn.Module):
                  label_loader: Optional[SynonymLabelLoader] = None,
                  use_gnn: bool = False,
                  adj_matrix: Optional[torch.Tensor] = None,
-                 chunk_aggregation: str = "max"):  # 新增：chunk结果聚合方式
+                 chunk_aggregation: str = "max"):  # Chunk result aggregation method
         super().__init__()
         
-        # BERT编码器
+        # BERT encoder
         self.bert_model = AutoModel.from_pretrained(bert_model_path,add_pooling_layer=False)
         self.chunk_size = chunk_size
         self.overlap = max(0, int(overlap))
         if self.overlap >= self.chunk_size:
-            raise ValueError("overlap 必须小于 chunk_size")
+            raise ValueError("overlap must be less than chunk_size")
         self.stride = self.chunk_size - self.overlap
         self.chunk_aggregation = chunk_aggregation  # "mean", "max", "sum", "weighted"
         hidden_size = self.bert_model.config.hidden_size
         
-        # 标签加载（与V1相同）
+        # Label loading (same as V1)
         if label_loader is None:
-            assert codes_file is not None, "当未提供 label_loader 时，必须指定 codes_file"
+            assert codes_file is not None, "codes_file must be specified when label_loader is not provided"
             label_loader = SynonymLabelLoader(
                 codes_file=codes_file,
                 pretrained_model_name=label_model_name,
@@ -438,11 +438,11 @@ class ClinicalBERTChunkAttentionV2(nn.Module):
         self.label_embs = nn.Parameter(label_embs)
         self.term_counts = term_counts
         
-        # GNN模块（与V1相同）
+        # GNN module (same as V1)
         self.use_gnn = use_gnn
         self.hier_mode = False
         if self.use_gnn:
-            assert adj_matrix is not None, "当 use_gnn=True 时，必须提供 adj_matrix。"
+            assert adj_matrix is not None, "adj_matrix must be provided when use_gnn=True."
             if isinstance(adj_matrix, dict) and "up" in adj_matrix and "down" in adj_matrix:
                 self.hier_mode = True
                 up_ei, up_w = adj_matrix["up"]
@@ -458,7 +458,7 @@ class ClinicalBERTChunkAttentionV2(nn.Module):
                 self.register_buffer("edge_weight", edge_weight)
                 self.gnn = LabelGNN(hidden_size, hidden_size // 2, hidden_size)
 
-        # 标签感知注意力
+        # Label-aware attention
         self.attention = LabelAttention(
             attention_head=term_counts,
             rep_droupout_num=0.1,
@@ -469,7 +469,7 @@ class ClinicalBERTChunkAttentionV2(nn.Module):
             est_cls=1
         )
         
-        # chunk权重网络（用于加权聚合）
+        # Chunk weight network (for weighted aggregation)
         if self.chunk_aggregation == "weighted":
             self.chunk_weight_net = nn.Sequential(
                 nn.Linear(hidden_size, hidden_size // 4),
@@ -478,7 +478,7 @@ class ClinicalBERTChunkAttentionV2(nn.Module):
                 nn.Sigmoid()
             )
         
-        # 投影头
+        # Projection head
         projection_dim = 256
         self.shared_head = nn.Sequential(
             nn.Linear(hidden_size, hidden_size),
@@ -489,7 +489,7 @@ class ClinicalBERTChunkAttentionV2(nn.Module):
         self.label_projection_head = self.shared_head
 
     def get_label_embeddings(self):
-        """获取标签嵌入，与V1相同"""
+        """Get label embeddings, same as V1"""
         raw_embs = self.label_embs
         
         if self.use_gnn:
@@ -520,17 +520,17 @@ class ClinicalBERTChunkAttentionV2(nn.Module):
                 input_ids: torch.Tensor,
                 attention_mask: torch.Tensor) -> dict:
         """
-        前向传播 - V2版本（先注意力再拼接）
+        Forward pass - V2 version (attention first, then concatenate)
         """
         batch_size, total_tokens = input_ids.shape
         
-        # 计算 stride 与需要的 padding，使滑窗覆盖到末尾
+        # Calculate stride and required padding to ensure sliding window covers to the end
         stride = self.stride  # = chunk_size - overlap
         if stride <= 0:
-            raise ValueError("stride 必须为正数。请确保 overlap < chunk_size。")
+            raise ValueError("stride must be positive. Ensure overlap < chunk_size.")
 
         if self.overlap == 0:
-            # 保持原有按整块切分的逻辑
+            # Keep original whole chunk splitting logic
             num_chunks = (total_tokens + self.chunk_size - 1) // self.chunk_size
             padded_length = num_chunks * self.chunk_size
             if padded_length > total_tokens:
@@ -540,44 +540,44 @@ class ClinicalBERTChunkAttentionV2(nn.Module):
             chunked_input_ids = input_ids.view(batch_size, num_chunks, self.chunk_size)
             chunked_attention_mask = attention_mask.view(batch_size, num_chunks, self.chunk_size)
         else:
-            # 计算需要的padding，使最后一个窗口起点不超过 total_tokens-1
-            # 使 (num_chunks-1)*stride + chunk_size >= total_tokens
+            # Calculate padding needed to ensure last window start doesn't exceed total_tokens-1
+            # Make (num_chunks-1)*stride + chunk_size >= total_tokens
             num_chunks = (max(0, total_tokens - self.chunk_size) + stride) // stride + 1
             effective_length = (num_chunks - 1) * stride + self.chunk_size
             if effective_length > total_tokens:
                 pad_length = effective_length - total_tokens
                 input_ids = F.pad(input_ids, (0, pad_length), value=0)
                 attention_mask = F.pad(attention_mask, (0, pad_length), value=0)
-            # 使用 unfold 生成滑窗块
+            # Use unfold to generate sliding window chunks
             # (N, L) -> (N, num_chunks, chunk_size)
             chunked_input_ids = input_ids.unfold(dimension=1, size=self.chunk_size, step=stride)
             chunked_attention_mask = attention_mask.unfold(dimension=1, size=self.chunk_size, step=stride)
-            # unfold 返回 (N, num_chunks, chunk_size)
+            # unfold returns (N, num_chunks, chunk_size)
         
-        # 获取标签嵌入
+        # Get label embeddings
         label_embs_for_attention, label_proto_for_contrastive = self.get_label_embeddings()
         
-        # 对每个chunk独立处理
+        # Process each chunk independently
         chunk_logits = []
         chunk_text_feats = []
         
         for i in range(num_chunks):
-            # 当前chunk的输入
+            # Current chunk input
             chunk_input_ids = chunked_input_ids[:, i, :]  # (batch_size, chunk_size)
             chunk_attention_mask = chunked_attention_mask[:, i, :]  # (batch_size, chunk_size)
             
-            # 跳过全是padding的chunk
+            # Skip chunks that are all padding
             if chunk_attention_mask.sum() == 0:
                 continue
                 
-            # BERT编码
+            # BERT encoding
             chunk_outputs = self.bert_model(
                 input_ids=chunk_input_ids,
                 attention_mask=chunk_attention_mask
             )
             chunk_hidden = chunk_outputs.last_hidden_state  # (batch_size, chunk_size, hidden_size)
             
-            # 在当前chunk上进行标签注意力
+            # Perform label attention on current chunk
             chunk_logit, chunk_text_feat = self.attention(
                 chunk_hidden,
                 chunk_attention_mask,
@@ -587,9 +587,9 @@ class ClinicalBERTChunkAttentionV2(nn.Module):
             chunk_logits.append(chunk_logit)  # (batch_size, num_labels)
             chunk_text_feats.append(chunk_text_feat)  # (batch_size, num_labels, hidden_size)
         
-        # 聚合各chunk的结果
+        # Aggregate results from all chunks
         if len(chunk_logits) == 0:
-            # 所有chunk都是padding，返回零结果
+            # All chunks are padding, return zero results
             device = input_ids.device
             final_logits = torch.zeros(batch_size, self.num_labels, device=device)
             final_text_feat = torch.zeros(batch_size, self.num_labels, 
@@ -608,15 +608,15 @@ class ClinicalBERTChunkAttentionV2(nn.Module):
                 final_logits = chunk_logits.sum(dim=1)
                 final_text_feat = chunk_text_feats.sum(dim=1)
             elif self.chunk_aggregation == "weighted":
-                # 基于文本特征计算权重
+                # Compute weights based on text features
                 chunk_weights = self.chunk_weight_net(chunk_text_feats.mean(dim=2))  # (batch_size, num_valid_chunks, 1)
-                chunk_weights = F.softmax(chunk_weights, dim=1)  # 归一化
+                chunk_weights = F.softmax(chunk_weights, dim=1)  # Normalize
                 final_logits = (chunk_logits * chunk_weights).sum(dim=1)
                 final_text_feat = (chunk_text_feats * chunk_weights.unsqueeze(-1)).sum(dim=1)
             else:
-                raise ValueError(f"不支持的聚合方式: {self.chunk_aggregation}")
+                raise ValueError(f"Unsupported aggregation method: {self.chunk_aggregation}")
         
-        # 应用投影头
+        # Apply projection head
         contrastive_text_feat = self.text_projection_head(final_text_feat)
         contrastive_label_proto = self.label_projection_head(label_proto_for_contrastive)
 
