@@ -26,7 +26,7 @@ The project uses the following pretrained models that need to be downloaded in a
 ## 📁 Data Preparation
 ### 1. MIMIC Dataset Access
 Due to the privacy regulations associated with clinical data, we cannot provide the MIMIC-III dataset directly.
-* Please request access to MIMIC-III (v1.4) via [PhysioNet](https://physionet.org/content/mimiciii/).
+* Please request access to MIMIC-III (v1.4) and MIMIC-IV(v2.2) via [PhysioNet](https://physionet.org/content/mimiciii/).
 * Complete the required CITI training and sign the Data Use Agreement.
 
 ### 2. Preprocessing
