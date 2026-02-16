@@ -13,18 +13,12 @@ conda activate cola-icd
 ```bash
 # Install requirements.txt
 pip install -r requirements.txt
-
-### 3. Download Pretrained Models
+```
+### Download Pretrained Models
 
 The project uses the following pretrained models that need to be downloaded in advance:
 
 ```bash
-# Text Encoder (choose one)
-# - Clinical-Longformer: https://huggingface.co/yikuan8/Clinical-Longformer
-# - SapBERT: https://huggingface.co/cambridgeltl/SapBERT-from-PubMedBERT-fulltext
-
-# Label Encoder
-# - Bio_ClinicalBERT: https://huggingface.co/emilyalsentzer/Bio_ClinicalBERT
 # - SapBERT: https://huggingface.co/cambridgeltl/SapBERT-from-PubMedBERT-fulltext
 ```
 
