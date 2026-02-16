@@ -4,28 +4,15 @@
 ### 1. Create Conda Environment
 
 ```bash
-conda create -n attentionicd python=3.10
-conda activate attentionicd
+conda create -n cola-icd python=3.10
+conda activate cola-icd
 ```
 
 ### 2. Install Dependencies
 
 ```bash
-# Install PyTorch (adjust according to your CUDA version)
-pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
-
-# Install other core dependencies
-pip install transformers==4.51.3
-pip install pandas==2.2.3
-pip install pyarrow==18.1.0
-pip install scikit-learn==1.6.1
-pip install wandb==0.21.0
-pip install sentence-transformers==3.3.1
-pip install torch-geometric==2.6.1
-
-# Install PyG related libraries (adjust according to CUDA version)
-pip install torch_scatter torch_sparse torch_cluster torch_spline_conv -f https://data.pyg.org/whl/torch-2.6.0+cu124.html
-```
+# Install requirements.txt
+pip install -r requirements.txt
 
 ### 3. Download Pretrained Models
 
@@ -55,19 +42,23 @@ To ensure a fair comparison with baselines, we follow the standard data preproce
 
 ```
 data/
-├── mimiciii_full/                    # MIMIC-III full dataset
-│   ├── MIMICIII_train.feather        # Training set
-│   ├── MIMICIII_val.feather          # Validation set
-│   ├── MIMICIII_test.feather         # Test set
-│   └── icd9_codes_mimiciii.feather   # ICD codes and descriptions
-├── mimiciii_50/                      # MIMIC-III Top-50 subset
+├── mimiciii_full/                        # MIMIC-III full dataset
+│   ├── MIMICIII_train.feather            # Training set
+│   ├── MIMICIII_val.feather              # Validation set
+│   ├── MIMICIII_test.feather             # Test set
+│   └── icd9_codes_mimiciii.feather       # ICD codes and descriptions
+├── mimiciv_full/                         # MIMIC-IV full dataset
+│   ├── mimiciv_icd9_train.feather        # Training set
+│   ├── mimiciv_icd9_val.feather          # Validation set
+│   ├── mimiciv_icd9_test.feather         # Test set
+│   └── filtered_icd_codes_with_desc.feather  # ICD codes and descriptions
+├── mimiciii_50/                          # MIMIC-III Top-50 subset
 │   ├── mimiciii_50_train.feather
 │   ├── mimiciii_50_val.feather
 │   ├── mimiciii_50_test.feather
 │   └── top50.feather
-├── icd_synonyms_enhanced_gemini.json # ICD synonyms file (optional)
-└── icd9_abbreviations_gemini.json    # ICD abbreviations file (optional)
-```
+├── icd_synonyms_enhanced_gemini.json     # ICD synonyms file (optional)
+└── icd9_abbreviations_gemini.json        # ICD abbreviations file (optional)
 
 
 ## 🚀 Quick Start
@@ -220,4 +211,3 @@ The model uses the following evaluation metrics:
 - **F1 Score (Macro/Micro)**: F1 score
 - **AUC (Macro/Micro)**: Area Under ROC Curve
 - **Precision@K** (K=5, 8, 10, 15): Top-K precision
-- **MAP**: Mean Average Precision
