@@ -1,0 +1,36 @@
+# PyTorch and related packages
+torch==2.6.0
+torchvision==0.21.0
+torchaudio==2.6.0
+
+# Transformers and NLP
+transformers==4.51.3
+sentence-transformers==3.3.1
+
+# Data processing
+pandas==2.2.3
+pyarrow==18.1.0
+numpy
+
+# Machine Learning
+scikit-learn==1.6.1
+
+# Graph Neural Networks
+torch-geometric==2.6.1
+torch-scatter
+torch-sparse
+torch-cluster
+torch-spline-conv
+
+# Optimization
+opt-einsum
+
+# Experiment tracking
+wandb==0.21.0
+
+# Progress bar
+tqdm
+
+# Other utilities
+matplotlib
+seaborn
