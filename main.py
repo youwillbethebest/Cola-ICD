@@ -44,7 +44,7 @@ def parse_args():
     parser.add_argument("--train_file",default="data/mimiciv_icd9_train.feather", type=str, help="Path to training data (.feather)")
     parser.add_argument("--val_file",default="data/mimiciv_icd9_val.feather", type=str, help="Path to validation data (.feather)")
     parser.add_argument("--test_file",default="data/mimiciv_icd9_test.feather", type=str, help="Path to test data (.feather)")  
-    parser.add_argument("--codes_file", type=str, default="data/filtered_icd_codes_with_desc.feather", help="Path to ICD codes and descriptions file")
+    parser.add_argument("--codes_file", type=str, default="data/icd_codes_with_desc.feather", help="Path to ICD codes and descriptions file")
     parser.add_argument("--synonyms_file", type=str, default="data/icd_synonyms.json", help="Path to ICD synonyms file")
     parser.add_argument("--abbreviations_file", type=str, default=None, help="Path to ICD abbreviations file")
     parser.add_argument("--use_abbreviations", action="store_true", default=False, help="Whether to use abbreviations and common expressions as separate terms")
