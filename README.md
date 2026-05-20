@@ -53,6 +53,32 @@ data/
 │   └── top50.feather
 ├── icd_synonyms_enhanced_gemini.json     # ICD synonyms file (optional)
 └── icd9_abbreviations_gemini.json        # ICD abbreviations file (optional)
+```
+
+### 3. Knowledge Injection Files
+
+This repository includes generated knowledge injection resources under `Knowledge injection/`.
+
+For MIMIC-IV ICD-10 experiments, use:
+
+```
+Knowledge injection/icd10_synonyms_unique.json
+Knowledge injection/icd10_abbreviations_gemini_with_evidence_common_expressions_unique.json
+```
+
+The ICD-10 abbreviation file contains generated abbreviations, clinical expressions, extended definitions, and evidence-style expressions folded into `common_expressions`. Use it with `--use_abbreviations`:
+
+```bash
+python main.py \
+    --train_file data/mimiciv_icd10/mimiciv_icd10_pure_train.feather \
+    --val_file data/mimiciv_icd10/mimiciv_icd10_pure_val.feather \
+    --test_file data/mimiciv_icd10/mimiciv_icd10_pure_test.feather \
+    --codes_file data/mimiciv_icd10/icd10_codes_with_desc_unique.feather \
+    --synonyms_file "Knowledge injection/icd10_synonyms_unique.json" \
+    --abbreviations_file "Knowledge injection/icd10_abbreviations_gemini_with_evidence_common_expressions_unique.json" \
+    --use_abbreviations \
+    --term_count 4
+```
 
 
 ## 🚀 Quick Start
