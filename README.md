@@ -1,3 +1,8 @@
+# CoLa-ICD
+
+Official implementation of **CoLa-ICD: A Knowledge-Enhanced Framework for Long-Tail Automated Medical Coding**.
+
+🎉 **Accepted to Findings of EMNLP 2026.**
 
 ## 🔧 Environment Setup
 
@@ -231,3 +236,19 @@ The model uses the following evaluation metrics:
 - **F1 Score (Macro/Micro)**: F1 score
 - **AUC (Macro/Micro)**: Area Under ROC Curve
 - **Precision@K** (K=5, 8, 10, 15): Top-K precision
+
+## 📖 Citation
+
+If you find this work useful, please cite our paper:
+
+```bibtex
+@inproceedings{cheng-etal-2026-cola-icd,
+  title     = {{CoLa-ICD}: A Knowledge-Enhanced Framework for Long-Tail Automated Medical Coding},
+  author    = {Cheng, Yihang and Liesaputra, Veronica and Trotman, Andrew},
+  booktitle = {Findings of the Association for Computational Linguistics: EMNLP 2026},
+  month     = oct,
+  year      = {2026},
+  address   = {Budapest, Hungary},
+  publisher = {Association for Computational Linguistics}
+}
+```
