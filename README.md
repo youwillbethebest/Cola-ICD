@@ -31,7 +31,7 @@ The project uses the following pretrained models that need to be downloaded in a
 ## 📁 Data Preparation
 ### 1. MIMIC Dataset Access
 Due to the privacy regulations associated with clinical data, we cannot provide the MIMIC-III dataset directly.
-* Please request access to MIMIC-III (v1.4) and MIMIC-IV(v2.2) via [PhysioNet](https://physionet.org/content/mimiciii/).
+* Please request access to MIMIC-III (v1.4) and MIMIC-IV (v2.2) via PhysioNet ([MIMIC-III](https://physionet.org/content/mimiciii/), [MIMIC-IV](https://physionet.org/content/mimiciv/)).
 * Complete the required CITI training and sign the Data Use Agreement.
 
 ### 2. Preprocessing
@@ -46,11 +46,11 @@ data/
 │   ├── MIMICIII_val.feather              # Validation set
 │   ├── MIMICIII_test.feather             # Test set
 │   └── icd9_codes_mimiciii.feather       # ICD codes and descriptions
-├── mimiciv_full/                         # MIMIC-IV full dataset
-│   ├── mimiciv_icd9_train.feather        # Training set
-│   ├── mimiciv_icd9_val.feather          # Validation set
-│   ├── mimiciv_icd9_test.feather         # Test set
-│   └── filtered_icd_codes_with_desc.feather  # ICD codes and descriptions
+├── mimiciv_icd10/                        # MIMIC-IV ICD-10 dataset
+│   ├── mimiciv_icd10_pure_train.feather  # Training set
+│   ├── mimiciv_icd10_pure_val.feather    # Validation set
+│   ├── mimiciv_icd10_pure_test.feather   # Test set
+│   └── icd10_codes_with_desc_unique.feather  # ICD-10 codes and descriptions
 ├── mimiciii_50/                          # MIMIC-III Top-50 subset
 │   ├── mimiciii_50_train.feather
 │   ├── mimiciii_50_val.feather
